@@ -35,8 +35,8 @@ jamhead verify   --data ./data [--deep]                 # integrity check and sa
 jamhead stats    --data ./data
 ```
 
-`jh` is an alias for `jamhead` in the Docker image. Deployment (Docker, Dokploy, scheduled updates, rollback)
-is in [docs/deploy.md](docs/deploy.md).
+`jh` is an alias for `jamhead` in the Docker image. Requirements (**the full catalog needs about 250 GB of disk**), Docker, scheduled updates and rollback are in
+[docs/deploy.md](docs/deploy.md).
 
 ## API
 

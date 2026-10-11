@@ -259,7 +259,12 @@ fn run_kind(
     let (limit, reader_path) = (opts.limit, path.to_path_buf());
     let reader = std::thread::spawn(move || {
         if let Err(e) = read_dump(&reader_path, name, limit, &tx) {
-            let _ = tx.send(Err(e));
+            let hint =
+                "the file may be cut off (an unfinished download?); use --limit to stop earlier";
+            let _ = tx.send(Err(e.context(format!(
+                "reading the {name} dump {}: {hint}",
+                reader_path.display()
+            ))));
         }
     });
 

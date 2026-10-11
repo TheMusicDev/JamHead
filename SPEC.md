@@ -99,9 +99,9 @@ Ingest design: one parser + one builder per entity type behind a common trait, s
 ## Docker and deploy
 
 - Multi-stage `Dockerfile`: Rust build stage (use `cargo-chef` or similar for layer caching), final stage `scratch`/`distroless` containing only the binary.
-- Target both `linux/arm64` (Oracle Cloud A1.Flex via Dokploy) and `linux/amd64`. Document the `buildx` command.
+- Target both `linux/arm64` and `linux/amd64`. Document the `buildx` command. (No production host has been chosen yet.)
 - Data is a mounted volume, never baked into the image.
-- The same image runs `serve` (long-running) and `update` (scheduled job). Document the Dokploy setup: one app with a volume, plus a scheduled task for `jh update`.
+- The same image runs `serve` (long-running) and `update` (scheduled job). Document how to run it with a volume and a scheduled `jh update`.
 - Keep memory predictable: LMDB is mmap'd, FSTs are loaded or mmap'd, and the Tantivy readers are shared.
 
 ## Local development
@@ -127,7 +127,7 @@ The owner knows Bun/TypeScript, not Rust, so correctness is defined in TypeScrip
 2. **Artists end to end.** Ingest artist dump -> LMDB + FST, serve `GET /v1/artist/{mbid}` and prefix search, Bun API tests, first benchmark.
 3. **Release groups and releases.** Add both entity builders, the relationship ID lists, and the list endpoints.
 4. **Search.** Add Tantivy full-text and fuzzy modes, unify the `/v1/search/{entity}` endpoint.
-5. **Operations.** `download` and `update`, atomic swap and reload, `verify`, compression, ETags, Dokploy deployment docs.
+5. **Operations.** `download` and `update`, atomic swap and reload, `verify`, compression, ETags, deployment docs.
 6. **Hardening.** Full-dump run on the real data, memory/latency profiling, decide whether LMDB should be replaced behind the `EntityStore` trait.
 
 ## Repo setup (first step for Claude Code)
@@ -159,8 +159,7 @@ estimate. See `docs/benchmarks.md`. Where the code differs from this document:
   `POST /admin/reload` with a bearer token (off unless `--admin-token` / `JAMHEAD_ADMIN_TOKEN` is set).
 - **Supplementary data** (tags, genres, ratings, annotations) is off by default and kept only with
   `--include-supplementary`.
-- **Final Docker image is Alpine, not scratch**, because Dokploy runs terminal and scheduled commands through a
-  shell in the container. The binary itself is fully static.
+- **Final Docker image is Alpine, not scratch**, so there is a shell in the container for `docker exec` and rollbacks. The binary itself is fully static.
 - The data volume must be writable (LMDB keeps `lock.mdb` next to the data file).
 - `jh` is a symlink to `jamhead` in the Docker image, not a second Cargo binary.
 - Dump PGP signatures (`.asc`) are not verified; SHA256SUMS are.

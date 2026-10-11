@@ -21,8 +21,8 @@ RUN cargo build --release \
  && cp target/release/jamhead /out/jamhead \
  && ln -s jamhead /out/jh
 
-# Alpine, not scratch: Dokploy's terminal and scheduled tasks run commands through a shell inside the
-# container (and it makes `ln -sfn` rollbacks possible). Costs about 8 MB. Static binary, so the base is
+# Alpine, not scratch: a shell inside the container makes `docker exec`, one-off commands and
+# `ln -sfn` rollbacks possible. Costs about 8 MB. Static binary, so the base is
 # only here for the shell.
 FROM alpine:3
 COPY --from=builder /out/ /usr/local/bin/

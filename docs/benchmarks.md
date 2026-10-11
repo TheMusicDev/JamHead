@@ -232,11 +232,11 @@ rounding; not worth it alone). None needs a change of storage engine, and `Entit
 
 So a full update is roughly 35 minutes of ingest plus the download, and about 66 GB per data version; with three
 versions on disk while one is being built that is about 200 GB, so plan the volume accordingly (see
-`docs/deploy.md`, which needs this correction once measured).
+`docs/deploy.md`, whose requirements table needs correcting once measured).
 Unknowns only a real run can answer: latency with a cold page cache on the server's disk, text search on common
 words at 5 M releases, and whether the 4 GB name-table peak is comfortable on the target machine.
 
-To measure it on the server (inside the Dokploy container, with enough disk):
+To measure it on a machine with about 250 GB free:
 
 ```
 time jh update --data /data --dumps /data/dumps

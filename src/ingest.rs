@@ -4,6 +4,9 @@
 //! rayon parses a batch in parallel, and the batch is written to LMDB. Memory use is a
 //! few batches plus the small name table used to build the search index.
 
+use crate::compress::Blob;
+#[cfg(test)]
+use crate::compress::Encoding;
 use crate::datadir::{self, Meta, SCHEMA_VERSION};
 use crate::mbid::{self, Mbid};
 use crate::model::{credit_text, Artist, Release, ReleaseGroup};
@@ -38,7 +41,7 @@ pub struct Ctx {
 /// One parsed dump line, ready to store and index.
 struct Record {
     id: Mbid,
-    blob: Vec<u8>,
+    blob: Blob,
     doc: Doc,
     /// Ids of the parents this record belongs to (artists of a release group, group of a release).
     parents: Vec<Mbid>,
@@ -106,7 +109,7 @@ fn parse_artist(line: &[u8], ctx: &Ctx) -> Result<Record> {
     };
     Ok(Record {
         id,
-        blob: serde_json::to_vec(&a)?,
+        blob: Blob::new(serde_json::to_vec(&a)?)?,
         doc,
         parents: vec![],
         sort: 0,
@@ -139,7 +142,7 @@ fn parse_release_group(line: &[u8], ctx: &Ctx) -> Result<Record> {
     let sort = date_key(g.first_release_date.as_deref());
     Ok(Record {
         id,
-        blob: serde_json::to_vec(&g)?,
+        blob: Blob::new(serde_json::to_vec(&g)?)?,
         doc,
         parents,
         sort,
@@ -165,7 +168,7 @@ fn parse_release(line: &[u8], ctx: &Ctx) -> Result<Record> {
     let sort = date_key(r.date.as_deref());
     Ok(Record {
         id,
-        blob: serde_json::to_vec(&r)?,
+        blob: Blob::new(serde_json::to_vec(&r)?)?,
         doc,
         parents,
         sort,
@@ -331,8 +334,15 @@ const ORDER: [Kind; 3] = [Kind::Release, Kind::ReleaseGroup, Kind::Artist];
 
 pub fn run(opts: &Options) -> Result<PathBuf> {
     fs::create_dir_all(&opts.out)?;
-    let now = chrono::Utc::now();
-    let version = format!("v{}", now.format("%Y-%m-%dT%H%M%S"));
+    // Versions are named by the second; if one already exists (two quick runs), wait for the next.
+    let (now, version) = loop {
+        let now = chrono::Utc::now();
+        let version = format!("v{}", now.format("%Y-%m-%dT%H%M%S"));
+        if !opts.out.join(&version).exists() {
+            break (now, version);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    };
     let build = opts.out.join(format!(".building-{version}"));
     let _ = fs::remove_dir_all(&build);
     fs::create_dir_all(build.join("fst"))?;
@@ -376,6 +386,7 @@ pub fn run(opts: &Options) -> Result<PathBuf> {
         created_at: now.to_rfc3339(),
         supplementary: opts.include_supplementary,
         counts,
+        files: datadir::describe_files(&build)?,
     };
     fs::write(build.join("meta.json"), serde_json::to_vec_pretty(&meta)?)?;
 
@@ -423,7 +434,11 @@ mod tests {
         )
         .unwrap();
         let id = mbid::parse(first["id"].as_str().unwrap()).unwrap();
-        let blob = data.store.get(Kind::Artist, &id).unwrap().unwrap();
+        let blob = data
+            .store
+            .get(Kind::Artist, &id, Encoding::Identity)
+            .unwrap()
+            .unwrap();
         let got: serde_json::Value = serde_json::from_slice(&blob).unwrap();
         assert_eq!(got["name"], first["name"]);
         assert!(got.get("relations").is_none());

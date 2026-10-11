@@ -7,11 +7,13 @@ use crate::store::{EntityStore, Kind, LmdbStore};
 use crate::text::TextIndex;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Meta {
@@ -22,10 +24,21 @@ pub struct Meta {
     pub supplementary: bool,
     /// Entities per kind, keyed by API name ("artist", "release-group", ...).
     pub counts: BTreeMap<String, u64>,
+    /// Size (and checksum) of every file in the version directory except meta.json, for `verify`.
+    pub files: BTreeMap<String, FileInfo>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct FileInfo {
+    pub size: u64,
+    /// Left out for the LMDB data file, which can be hundreds of GB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 /// Everything the server needs from one opened data version.
 pub struct Data {
+    pub dir: PathBuf,
     pub meta: Meta,
     pub store: Box<dyn EntityStore>,
     pub names: HashMap<Kind, NameIndex>,
@@ -57,12 +70,68 @@ impl Data {
             }
         }
         Ok(Data {
+            dir: dir.to_path_buf(),
             meta,
             store,
             names,
             text,
         })
     }
+}
+
+pub fn sha256_file(path: &Path) -> Result<String> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
+/// Record every file of a finished version so `verify` can detect damage later.
+pub fn describe_files(dir: &Path) -> Result<BTreeMap<String, FileInfo>> {
+    fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, FileInfo>) -> Result<()> {
+        for entry in fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                walk(root, &path, out)?;
+                continue;
+            }
+            let rel = path
+                .strip_prefix(root)?
+                .to_string_lossy()
+                .replace('\\', "/");
+            // Lock files are bookkeeping that readers may recreate.
+            if rel == "meta.json" || rel.ends_with(".lock") || rel.ends_with("lock.mdb") {
+                continue;
+            }
+            let sha256 = if rel == "store/data.mdb" {
+                None
+            } else {
+                Some(sha256_file(&path)?)
+            };
+            out.insert(
+                rel,
+                FileInfo {
+                    size: fs::metadata(&path)?.len(),
+                    sha256,
+                },
+            );
+        }
+        Ok(())
+    }
+    let mut out = BTreeMap::new();
+    walk(dir, dir, &mut out)?;
+    Ok(out)
 }
 
 /// `--data` may be the root (with a `current` link) or a version directory itself.

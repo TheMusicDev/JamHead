@@ -102,3 +102,30 @@ Same data sets as before. Ingest now also builds a Tantivy index per entity.
 
 Not yet known: how text search behaves on a very common word ("love", "the") against the full 5-million-release
 index, where a query matches a large share of all documents. That is a milestone 6 measurement.
+
+## Milestone 5: operations (2026-10-11)
+
+Same 20k-release data set as milestone 3.
+
+**Ingest with compressed copies and compaction**: 3.8 s (was 2.9 s), peak memory 737 MB (was 401 MB).
+LMDB store: 266 MB (was 154 MB with plain blobs only). Each blob is now stored plain, zstd and gzip, so the
+store grew 73%; compacting the file at the end of ingest took 29 MB off (294 -> 266 MB).
+
+**Response size and speed by encoding** (`oha`, 32 connections, 5 s, release lookups / release-group release lists):
+
+| request | req/s | p50 | p99 | bytes per response |
+|---|---:|---:|---:|---:|
+| release, plain | 114,200 | 0.26 ms | 0.89 ms | 3.66 KiB |
+| release, `Accept-Encoding: zstd` | 116,000 | 0.26 ms | 0.70 ms | 1.55 KiB |
+| release, `Accept-Encoding: gzip` | 117,700 | 0.26 ms | 0.58 ms | 1.58 KiB |
+| release-group releases list, plain | 114,000 | 0.26 ms | 0.79 ms | 4.60 KiB |
+| release-group releases list, zstd | 118,600 | 0.25 ms | 0.67 ms | 1.99 KiB |
+
+Compression costs nothing at request time (the stored bytes are sent as they are) and cuts the bytes by 57%.
+As before, the request rate is capped by the load generator on one machine.
+
+**Switching data versions while serving** (the check that matters for "no downtime"): one `oha` run of 12 s
+against 32 connections, `current` flipped to the previous version at 3 s and back at 7 s, server polling every
+1 s: **1,445,860 requests, all HTTP 200** (the 25 requests `oha` reports as "aborted due to deadline" are the
+ones still running when its 12 s ended). The slowest request was 38 ms. The same property is also a test:
+`tests/api/ops.test.ts` "the server notices a new current version by itself, without failing requests".

@@ -89,3 +89,73 @@ export function findEmptyValue(v: any, path = ""): string | null {
   }
   return null;
 }
+
+/** Run a jamhead command and return exit code plus output. */
+export async function run(args: string[], env: Record<string, string> = {}) {
+  const proc = Bun.spawn([BIN, ...args], { stdout: "pipe", stderr: "pipe", env: { ...process.env, ...env } });
+  const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+  return { code: await proc.exited, stdout, stderr };
+}
+
+export interface Mirror {
+  url: string;
+  date: string;
+  requests: { path: string; range: string | null }[];
+  /** Serve different bytes for this file name (to test checksum failures). */
+  tamper: Set<string>;
+  stop(): void;
+}
+
+/**
+ * A tiny stand-in for data.metabrainz.org: serves the fixture dump as .tar.xz files, with
+ * LATEST, SHA256SUMS and Range support, and records every request.
+ */
+export async function startMirror(date = "20261010-001001"): Promise<Mirror> {
+  const dir = mkdtempSync(join(tmpdir(), "jamhead-mirror-"));
+  const files = new Map<string, Uint8Array>();
+  const sums: string[] = [];
+  for (const entity of ["artist", "release-group", "release"]) {
+    const name = `${entity}.tar.xz`;
+    await Bun.$`tar -cJf ${join(dir, name)} -C ${FIXTURE_DIR} mbdump/${entity}`.quiet();
+    const bytes = new Uint8Array(await Bun.file(join(dir, name)).arrayBuffer());
+    files.set(`/${date}/${name}`, bytes);
+    sums.push(`${new Bun.CryptoHasher("sha256").update(bytes).digest("hex")}  ${name}`);
+  }
+  files.set(`/${date}/SHA256SUMS`, new TextEncoder().encode(sums.join("\n") + "\n"));
+  files.set("/LATEST", new TextEncoder().encode(date + "\n"));
+
+  const requests: Mirror["requests"] = [];
+  const tamper = new Set<string>();
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const path = new URL(req.url).pathname;
+      const range = req.headers.get("range");
+      requests.push({ path, range });
+      let bytes = files.get(path);
+      if (!bytes) return new Response("not found", { status: 404 });
+      if (tamper.has(path.split("/").pop()!)) {
+        bytes = bytes.slice();
+        bytes[bytes.length - 1] ^= 0xff;
+      }
+      const m = range?.match(/^bytes=(\d+)-$/);
+      if (m) {
+        const start = Number(m[1]);
+        if (start >= bytes.length) return new Response("", { status: 416 });
+        return new Response(bytes.slice(start), { status: 206 });
+      }
+      return new Response(bytes);
+    },
+  });
+  return { url: `http://127.0.0.1:${server.port}`, date, requests, tamper, stop: () => server.stop(true) };
+}
+
+export async function waitFor<T>(what: string, fn: () => Promise<T | undefined | false>, ms = 8000): Promise<T> {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    const v = await fn();
+    if (v) return v;
+    await Bun.sleep(100);
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}

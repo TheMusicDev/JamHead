@@ -135,6 +135,19 @@ impl NameIndex {
         self.expand(found.into_iter().map(|f| f.2), limit)
     }
 
+    /// Every entity indexed under exactly this (already normalized) name. Used by `verify`.
+    pub fn lookup_exact(&self, normalized: &str) -> Vec<Mbid> {
+        self.fst
+            .get(normalized)
+            .map(|val| {
+                self.expand(std::iter::once(val & ((1 << OFFSET_BITS) - 1)), usize::MAX)
+                    .into_iter()
+                    .map(|h| h.id)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Names within a small edit distance of `q` (a swapped pair of letters counts as one edit),
     /// closest first.
     pub fn fuzzy(&self, q: &str, limit: usize) -> Vec<Hit> {
@@ -176,33 +189,48 @@ impl NameIndex {
         self.expand(found.into_iter().map(|f| f.2), limit)
     }
 
+    /// `n` bytes of the postings file at `p`, or None if the file is damaged or too short.
+    fn bytes(&self, p: usize, n: usize) -> Option<&[u8]> {
+        self.ids.get(p..p.checked_add(n)?)
+    }
+
     /// Read postings in order until `limit` distinct entities are collected.
+    /// A damaged postings file ends the walk early instead of crashing the server.
     fn expand(&self, offsets: impl Iterator<Item = u64>, limit: usize) -> Vec<Hit> {
         let mut hits: Vec<Hit> = Vec::new();
         for off in offsets {
-            let mut p = off as usize;
-            let n = u32::from_le_bytes(self.ids[p..p + 4].try_into().unwrap());
-            p += 4;
-            for _ in 0..n {
-                let id: Mbid = self.ids[p..p + 16].try_into().unwrap();
-                p += 16;
-                let mut parts = [String::new(), String::new()];
-                for part in &mut parts {
-                    let len = u16::from_le_bytes(self.ids[p..p + 2].try_into().unwrap()) as usize;
-                    p += 2;
-                    *part = String::from_utf8_lossy(&self.ids[p..p + len]).into_owned();
-                    p += len;
-                }
-                if !hits.iter().any(|h| h.id == id) {
-                    let [name, detail] = parts;
-                    hits.push(Hit { id, name, detail });
-                    if hits.len() >= limit {
-                        return hits;
-                    }
-                }
+            if self.read_group(off as usize, limit, &mut hits).is_none() {
+                break;
+            }
+            if hits.len() >= limit {
+                break;
             }
         }
         hits
+    }
+
+    fn read_group(&self, mut p: usize, limit: usize, hits: &mut Vec<Hit>) -> Option<()> {
+        let n = u32::from_le_bytes(self.bytes(p, 4)?.try_into().ok()?);
+        p += 4;
+        for _ in 0..n {
+            let id: Mbid = self.bytes(p, 16)?.try_into().ok()?;
+            p += 16;
+            let mut parts = [String::new(), String::new()];
+            for part in &mut parts {
+                let len = u16::from_le_bytes(self.bytes(p, 2)?.try_into().ok()?) as usize;
+                p += 2;
+                *part = String::from_utf8_lossy(self.bytes(p, len)?).into_owned();
+                p += len;
+            }
+            if !hits.iter().any(|h| h.id == id) {
+                let [name, detail] = parts;
+                hits.push(Hit { id, name, detail });
+                if hits.len() >= limit {
+                    return Some(());
+                }
+            }
+        }
+        Some(())
     }
 }
 

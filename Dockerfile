@@ -21,10 +21,13 @@ RUN cargo build --release \
  && cp target/release/jamhead /out/jamhead \
  && ln -s jamhead /out/jh
 
-FROM scratch
+# Alpine, not scratch: Dokploy's terminal and scheduled tasks run commands through a shell inside the
+# container (and it makes `ln -sfn` rollbacks possible). Costs about 8 MB. Static binary, so the base is
+# only here for the shell.
+FROM alpine:3
 COPY --from=builder /out/ /usr/local/bin/
-ENV PATH=/usr/local/bin
 VOLUME /data
 EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s CMD ["jamhead", "healthcheck"]
 ENTRYPOINT ["jamhead"]
 CMD ["serve", "--data", "/data", "--bind", "0.0.0.0:8080"]

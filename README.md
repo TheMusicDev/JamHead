@@ -18,6 +18,20 @@ cargo build --release
 curl localhost:8080/v1/meta
 ```
 
+## Commands
+
+```
+jamhead serve    --data ./data --bind 0.0.0.0:8080     # the API; follows the `current` data version
+jamhead ingest   --input <dumps> --out ./data [--limit N] [--include-supplementary]
+jamhead download --out ./dumps                          # latest MusicBrainz dump, resumable, checksum-verified
+jamhead update   --data ./data --dumps ./dumps          # download + ingest + go live (for a scheduled job)
+jamhead verify   --data ./data [--deep]                 # integrity check and sanity queries
+jamhead stats    --data ./data
+```
+
+`jh` is an alias for `jamhead` in the Docker image. Deployment (Docker, Dokploy, scheduled updates, rollback)
+is in [docs/deploy.md](docs/deploy.md).
+
 ## API
 
 | request | returns |
@@ -27,6 +41,9 @@ curl localhost:8080/v1/meta
 | `GET /v1/release-group/{mbid}/releases?limit=&offset=` | a release group's releases, oldest first |
 | `GET /v1/search/{artist\|release-group\|release}?q=&limit=&mode=prefix\|fuzzy\|text` | `{results: [{id, name, detail?}]}`, see [docs/search.md](docs/search.md) |
 | `GET /v1/meta`, `GET /healthz` | data version, dump date, counts / liveness |
+
+Responses honour `Accept-Encoding` (zstd or gzip, served pre-compressed), carry an `ETag` made of the data version
+and the MBID, and answer `If-None-Match` with `304`.
 
 ## Data and licensing
 

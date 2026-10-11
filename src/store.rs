@@ -1,12 +1,13 @@
 //! Entity storage. The API and ingest only talk to the two traits below, so LMDB can be
 //! replaced later (for example by a custom mmap'd file) without touching them.
 
+use crate::compress::{Blob, Encoding};
 use crate::mbid::Mbid;
 use anyhow::{Context, Result};
 use heed::types::Bytes;
-use heed::{Database, Env, EnvFlags, EnvOpenOptions};
+use heed::{CompactionOption, Database, Env, EnvFlags, EnvOpenOptions};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
@@ -36,6 +37,21 @@ impl Kind {
         }
     }
 
+    /// Table holding this kind's blobs in the given encoding.
+    pub fn blob_table(self, enc: Encoding) -> &'static str {
+        match (self, enc) {
+            (Kind::Artist, Encoding::Identity) => "artist",
+            (Kind::Artist, Encoding::Zstd) => "artist_zstd",
+            (Kind::Artist, Encoding::Gzip) => "artist_gzip",
+            (Kind::ReleaseGroup, Encoding::Identity) => "release_group",
+            (Kind::ReleaseGroup, Encoding::Zstd) => "release_group_zstd",
+            (Kind::ReleaseGroup, Encoding::Gzip) => "release_group_gzip",
+            (Kind::Release, Encoding::Identity) => "release",
+            (Kind::Release, Encoding::Zstd) => "release_zstd",
+            (Kind::Release, Encoding::Gzip) => "release_gzip",
+        }
+    }
+
     pub fn from_api_name(s: &str) -> Option<Kind> {
         Kind::ALL.into_iter().find(|k| k.api_name() == s)
     }
@@ -61,9 +77,13 @@ impl Rel {
 
 /// Read side. Used by the HTTP server.
 pub trait EntityStore: Send + Sync {
-    /// The exact JSON blob for one entity. One memory-mapped read plus a copy of the bytes.
-    fn get(&self, kind: Kind, id: &Mbid) -> Result<Option<Vec<u8>>>;
+    /// The exact JSON blob for one entity, in the requested encoding. One memory-mapped read plus a
+    /// copy of the bytes.
+    fn get(&self, kind: Kind, id: &Mbid, enc: Encoding) -> Result<Option<Vec<u8>>>;
     fn contains(&self, kind: Kind, id: &Mbid) -> Result<bool>;
+    fn count(&self, kind: Kind) -> Result<u64>;
+    /// Up to `n` entities in key order. Keys are random UUIDs, so this is a fair sample.
+    fn sample(&self, kind: Kind, n: usize) -> Result<Vec<(Mbid, Vec<u8>)>>;
     /// One page of a parent's children: (total children, ids in the page).
     fn children(
         &self,
@@ -76,7 +96,7 @@ pub trait EntityStore: Send + Sync {
 
 /// Write side. Used by ingest. A store is built once and never modified afterwards.
 pub trait StoreWriter {
-    fn put_batch(&mut self, kind: Kind, items: &[(Mbid, Vec<u8>)]) -> Result<()>;
+    fn put_batch(&mut self, kind: Kind, items: &[(Mbid, Blob)]) -> Result<()>;
     /// `items` are (parent, packed 16-byte child ids in the order they should be listed).
     fn put_children(&mut self, rel: Rel, items: &[(Mbid, Vec<u8>)]) -> Result<()>;
     fn finish(self: Box<Self>) -> Result<()>;
@@ -119,16 +139,15 @@ impl LmdbStore {
 }
 
 fn table_names() -> Vec<&'static str> {
-    Kind::ALL
+    let blobs = Kind::ALL
         .iter()
-        .map(|k| k.table())
-        .chain(Rel::ALL.iter().map(|r| r.table()))
-        .collect()
+        .flat_map(|k| Encoding::ALL.map(|e| k.blob_table(e)));
+    blobs.chain(Rel::ALL.iter().map(|r| r.table())).collect()
 }
 
 impl EntityStore for LmdbStore {
-    fn get(&self, kind: Kind, id: &Mbid) -> Result<Option<Vec<u8>>> {
-        let Some(db) = self.dbs.get(kind.table()) else {
+    fn get(&self, kind: Kind, id: &Mbid, enc: Encoding) -> Result<Option<Vec<u8>>> {
+        let Some(db) = self.dbs.get(kind.blob_table(enc)) else {
             return Ok(None);
         };
         let rtxn = self.env.read_txn()?;
@@ -141,6 +160,27 @@ impl EntityStore for LmdbStore {
         };
         let rtxn = self.env.read_txn()?;
         Ok(db.get(&rtxn, id)?.is_some())
+    }
+
+    fn count(&self, kind: Kind) -> Result<u64> {
+        let Some(db) = self.dbs.get(kind.table()) else {
+            return Ok(0);
+        };
+        let rtxn = self.env.read_txn()?;
+        Ok(db.len(&rtxn)?)
+    }
+
+    fn sample(&self, kind: Kind, n: usize) -> Result<Vec<(Mbid, Vec<u8>)>> {
+        let Some(db) = self.dbs.get(kind.table()) else {
+            return Ok(vec![]);
+        };
+        let rtxn = self.env.read_txn()?;
+        let mut out = Vec::new();
+        for entry in db.iter(&rtxn)?.take(n) {
+            let (key, value) = entry?;
+            out.push((key.try_into()?, value.to_vec()));
+        }
+        Ok(out)
     }
 
     fn children(
@@ -162,6 +202,7 @@ impl EntityStore for LmdbStore {
 }
 
 pub struct LmdbWriter {
+    dir: PathBuf,
     env: Env,
     dbs: HashMap<&'static str, Database<Bytes, Bytes>>,
 }
@@ -187,16 +228,22 @@ impl LmdbWriter {
             );
         }
         wtxn.commit()?;
-        Ok(Self { env, dbs })
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            env,
+            dbs,
+        })
     }
 }
 
 impl StoreWriter for LmdbWriter {
-    fn put_batch(&mut self, kind: Kind, items: &[(Mbid, Vec<u8>)]) -> Result<()> {
-        let db = self.dbs[kind.table()];
+    fn put_batch(&mut self, kind: Kind, items: &[(Mbid, Blob)]) -> Result<()> {
         let mut wtxn = self.env.write_txn()?;
-        for (id, blob) in items {
-            db.put(&mut wtxn, id, blob)?;
+        for enc in Encoding::ALL {
+            let db = self.dbs[kind.blob_table(enc)];
+            for (id, blob) in items {
+                db.put(&mut wtxn, id, blob.get(enc))?;
+            }
         }
         wtxn.commit()?;
         Ok(())
@@ -214,6 +261,13 @@ impl StoreWriter for LmdbWriter {
 
     fn finish(self: Box<Self>) -> Result<()> {
         self.env.force_sync()?;
+        // Writing in batches leaves unused pages behind. Copy to a compacted file and swap it in:
+        // smaller on disk and laid out in order for the readers.
+        let compact = self.dir.join("data.mdb.compact");
+        self.env.copy_to_path(&compact, CompactionOption::Enabled)?;
+        self.env.prepare_for_closing().wait();
+        std::fs::rename(&compact, self.dir.join("data.mdb"))?;
+        let _ = std::fs::remove_file(self.dir.join("lock.mdb"));
         Ok(())
     }
 }

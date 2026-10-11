@@ -115,13 +115,35 @@ async fn search(
     let limit = p.limit.unwrap_or(10).clamp(1, 100);
     let mode = p.mode.unwrap_or_else(|| "prefix".into());
     let data = app.load();
-    let Some(index) = data.names.get(&kind) else {
-        return error(StatusCode::NOT_FOUND, "no search index for this entity");
-    };
     let hits = match mode.as_str() {
-        "prefix" => index.prefix(&q, limit),
-        "fuzzy" => index.fuzzy(&q, limit),
-        _ => return error(StatusCode::BAD_REQUEST, "mode must be prefix or fuzzy"),
+        "prefix" | "fuzzy" => {
+            let Some(index) = data.names.get(&kind) else {
+                return error(StatusCode::NOT_FOUND, "no search index for this entity");
+            };
+            if mode == "prefix" {
+                index.prefix(&q, limit)
+            } else {
+                index.fuzzy(&q, limit)
+            }
+        }
+        "text" => {
+            let Some(index) = data.text.get(&kind) else {
+                return error(StatusCode::NOT_FOUND, "no search index for this entity");
+            };
+            match index.search(&q, limit) {
+                Ok(hits) => hits,
+                Err(e) => {
+                    eprintln!("text search error: {e:#}");
+                    return error(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+                }
+            }
+        }
+        _ => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "mode must be prefix, fuzzy or text",
+            )
+        }
     };
     let results: Vec<_> = hits
         .iter()

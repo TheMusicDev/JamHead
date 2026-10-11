@@ -10,6 +10,7 @@ use crate::model::{credit_text, Artist, Release, ReleaseGroup};
 use crate::norm::normalize;
 use crate::search::{self, Doc};
 use crate::store::{Kind, LmdbWriter, Rel, StoreWriter};
+use crate::text;
 use anyhow::{bail, Context, Result};
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
@@ -354,6 +355,8 @@ pub fn run(opts: &Options) -> Result<PathBuf> {
         let res = run_kind(kind, &path, opts, &ctx, writer.as_mut())?;
         search::build(&build.join("fst"), kind.table(), &res.docs)
             .with_context(|| format!("building {} name index", kind.api_name()))?;
+        text::build(&build.join("tantivy"), kind.table(), &res.docs)
+            .with_context(|| format!("building {} text index", kind.api_name()))?;
         if let Some(rel) = parent_rel(kind) {
             store_children(rel, res.links, writer.as_mut(), &mut ctx.child_counts)?;
         }

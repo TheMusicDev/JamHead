@@ -6,6 +6,7 @@ mod norm;
 mod search;
 mod server;
 mod store;
+mod text;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;

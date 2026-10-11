@@ -78,3 +78,27 @@ the load generator and the loopback network on one machine, not the server. Trea
 
 Server memory after the runs (`bun run bench`): 117 MB (artist), 185 MB (release group), 198 MB (release).
 Most of that is memory-mapped file pages that the OS can drop under pressure.
+
+## Milestone 4: Tantivy text search (2026-10-11)
+
+Same data sets as before. Ingest now also builds a Tantivy index per entity.
+
+| data set | ingest time | peak memory | Tantivy size | FST size |
+|---|---:|---:|---:|---:|
+| 100,000 artists | 1.7 s (was 0.9 s) | 359 MB | 6.6 MB | 11 MB |
+| 20,000 releases + 17,159 groups + 5,621 artists | 2.9 s (was 1.5 s) | 401 MB | 3.4 MB | 3.9 MB |
+
+`oha`, 32 connections, 5 s per scenario. Text queries are the first word of a random real name:
+
+| scenario | req/s | p50 | p99 |
+|---|---:|---:|---:|
+| text search, 100k artists | 63,000 | 0.47 ms | 1.4 ms |
+| text search, artist (small set) | 101,000 | 0.27 ms | 1.1 ms |
+| text search, release group | 97,600 | 0.29 ms | 1.1 ms |
+| text search, release | 92,400 | 0.30 ms | 1.3 ms |
+| (same run) prefix, 100k artists | 53,000 | 0.44 ms | 3.4 ms |
+| (same run) fuzzy, 100k artists | 10,400 | 2.8 ms | 7.4 ms |
+| (same run) id lookup, 100k artists | 113,000 | 0.27 ms | 0.81 ms |
+
+Not yet known: how text search behaves on a very common word ("love", "the") against the full 5-million-release
+index, where a query matches a large share of all documents. That is a milestone 6 measurement.

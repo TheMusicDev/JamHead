@@ -25,7 +25,7 @@ curl localhost:8080/v1/meta
 | `GET /v1/artist/{mbid}`, `/v1/release-group/{mbid}`, `/v1/release/{mbid}` | the stored JSON for one entity ([fields](docs/schema.md)) |
 | `GET /v1/artist/{mbid}/release-groups?limit=&offset=` | an artist's release groups, oldest first |
 | `GET /v1/release-group/{mbid}/releases?limit=&offset=` | a release group's releases, oldest first |
-| `GET /v1/search/{artist\|release-group\|release}?q=&limit=&mode=prefix\|fuzzy` | `{results: [{id, name, detail?}]}`, see [docs/search.md](docs/search.md) |
+| `GET /v1/search/{artist\|release-group\|release}?q=&limit=&mode=prefix\|fuzzy\|text` | `{results: [{id, name, detail?}]}`, see [docs/search.md](docs/search.md) |
 | `GET /v1/meta`, `GET /healthz` | data version, dump date, counts / liveness |
 
 ## Data and licensing

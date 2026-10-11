@@ -20,6 +20,7 @@ rayon = "1.12.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.0"
+tantivy = "0.26.2"
 tar = "0.4.46"
 tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "signal", "net"] }
 unicode-normalization = "0.1.25"

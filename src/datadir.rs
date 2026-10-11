@@ -4,6 +4,7 @@
 
 use crate::search::NameIndex;
 use crate::store::{EntityStore, Kind, LmdbStore};
+use crate::text::TextIndex;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -28,6 +29,7 @@ pub struct Data {
     pub meta: Meta,
     pub store: Box<dyn EntityStore>,
     pub names: HashMap<Kind, NameIndex>,
+    pub text: HashMap<Kind, TextIndex>,
 }
 
 impl Data {
@@ -45,13 +47,21 @@ impl Data {
             );
         }
         let store = Box::new(LmdbStore::open(&dir.join("store"))?);
-        let mut names = HashMap::new();
+        let (mut names, mut text) = (HashMap::new(), HashMap::new());
         for kind in Kind::ALL {
             if let Some(idx) = NameIndex::open(&dir.join("fst"), kind.table())? {
                 names.insert(kind, idx);
             }
+            if let Some(idx) = TextIndex::open(&dir.join("tantivy"), kind.table())? {
+                text.insert(kind, idx);
+            }
         }
-        Ok(Data { meta, store, names })
+        Ok(Data {
+            meta,
+            store,
+            names,
+            text,
+        })
     }
 }
 

@@ -41,15 +41,44 @@ impl Kind {
     }
 }
 
+/// A parent -> children list that is precomputed at ingest, sorted by date.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Rel {
+    ArtistReleaseGroups,
+    ReleaseGroupReleases,
+}
+
+impl Rel {
+    pub const ALL: [Rel; 2] = [Rel::ArtistReleaseGroups, Rel::ReleaseGroupReleases];
+
+    pub fn table(self) -> &'static str {
+        match self {
+            Rel::ArtistReleaseGroups => "artist_rgs",
+            Rel::ReleaseGroupReleases => "rg_releases",
+        }
+    }
+}
+
 /// Read side. Used by the HTTP server.
 pub trait EntityStore: Send + Sync {
     /// The exact JSON blob for one entity. One memory-mapped read plus a copy of the bytes.
     fn get(&self, kind: Kind, id: &Mbid) -> Result<Option<Vec<u8>>>;
+    fn contains(&self, kind: Kind, id: &Mbid) -> Result<bool>;
+    /// One page of a parent's children: (total children, ids in the page).
+    fn children(
+        &self,
+        rel: Rel,
+        parent: &Mbid,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(usize, Vec<Mbid>)>;
 }
 
 /// Write side. Used by ingest. A store is built once and never modified afterwards.
 pub trait StoreWriter {
     fn put_batch(&mut self, kind: Kind, items: &[(Mbid, Vec<u8>)]) -> Result<()>;
+    /// `items` are (parent, packed 16-byte child ids in the order they should be listed).
+    fn put_children(&mut self, rel: Rel, items: &[(Mbid, Vec<u8>)]) -> Result<()>;
     fn finish(self: Box<Self>) -> Result<()>;
 }
 
@@ -90,7 +119,11 @@ impl LmdbStore {
 }
 
 fn table_names() -> Vec<&'static str> {
-    Kind::ALL.iter().map(|k| k.table()).collect()
+    Kind::ALL
+        .iter()
+        .map(|k| k.table())
+        .chain(Rel::ALL.iter().map(|r| r.table()))
+        .collect()
 }
 
 impl EntityStore for LmdbStore {
@@ -100,6 +133,31 @@ impl EntityStore for LmdbStore {
         };
         let rtxn = self.env.read_txn()?;
         Ok(db.get(&rtxn, id)?.map(|b| b.to_vec()))
+    }
+
+    fn contains(&self, kind: Kind, id: &Mbid) -> Result<bool> {
+        let Some(db) = self.dbs.get(kind.table()) else {
+            return Ok(false);
+        };
+        let rtxn = self.env.read_txn()?;
+        Ok(db.get(&rtxn, id)?.is_some())
+    }
+
+    fn children(
+        &self,
+        rel: Rel,
+        parent: &Mbid,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(usize, Vec<Mbid>)> {
+        let Some(db) = self.dbs.get(rel.table()) else {
+            return Ok((0, vec![]));
+        };
+        let rtxn = self.env.read_txn()?;
+        let packed = db.get(&rtxn, parent)?.unwrap_or(&[]);
+        let total = packed.len() / 16;
+        let page = packed.chunks_exact(16).skip(offset).take(limit);
+        Ok((total, page.map(|c| c.try_into().unwrap()).collect()))
     }
 }
 
@@ -139,6 +197,16 @@ impl StoreWriter for LmdbWriter {
         let mut wtxn = self.env.write_txn()?;
         for (id, blob) in items {
             db.put(&mut wtxn, id, blob)?;
+        }
+        wtxn.commit()?;
+        Ok(())
+    }
+
+    fn put_children(&mut self, rel: Rel, items: &[(Mbid, Vec<u8>)]) -> Result<()> {
+        let db = self.dbs[rel.table()];
+        let mut wtxn = self.env.write_txn()?;
+        for (parent, packed) in items {
+            db.put(&mut wtxn, parent, packed)?;
         }
         wtxn.commit()?;
         Ok(())

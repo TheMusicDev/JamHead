@@ -6,10 +6,10 @@
 
 use crate::datadir::{self, Meta, SCHEMA_VERSION};
 use crate::mbid::{self, Mbid};
-use crate::model::Artist;
+use crate::model::{credit_text, Artist, Release, ReleaseGroup};
 use crate::norm::normalize;
 use crate::search::{self, Doc};
-use crate::store::{Kind, LmdbWriter, StoreWriter};
+use crate::store::{Kind, LmdbWriter, Rel, StoreWriter};
 use anyhow::{bail, Context, Result};
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
@@ -39,13 +39,50 @@ struct Record {
     id: Mbid,
     blob: Vec<u8>,
     doc: Doc,
+    /// Ids of the parents this record belongs to (artists of a release group, group of a release).
+    parents: Vec<Mbid>,
+    /// Position in the parents' child lists, see `date_key`.
+    sort: u32,
 }
 
 fn parse(kind: Kind, line: &[u8], ctx: &Ctx) -> Result<Record> {
     match kind {
         Kind::Artist => parse_artist(line, ctx),
-        _ => bail!("{} ingest is not implemented yet", kind.api_name()),
+        Kind::ReleaseGroup => parse_release_group(line, ctx),
+        Kind::Release => parse_release(line, ctx),
     }
+}
+
+/// The list a kind's records are filed under in their parents.
+fn parent_rel(kind: Kind) -> Option<Rel> {
+    match kind {
+        Kind::Artist => None,
+        Kind::ReleaseGroup => Some(Rel::ArtistReleaseGroups),
+        Kind::Release => Some(Rel::ReleaseGroupReleases),
+    }
+}
+
+/// "1994-09-27" -> 19940927, "1994" -> 19940000. No date sorts last.
+fn date_key(date: Option<&str>) -> u32 {
+    let Some(date) = date else { return u32::MAX };
+    let mut parts = date.split('-').map(|p| p.parse::<u32>().unwrap_or(0));
+    let (y, m, d) = (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    );
+    if y == 0 {
+        u32::MAX
+    } else {
+        y * 10_000 + m * 100 + d
+    }
+}
+
+fn unique_keys<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut keys: Vec<String> = names.map(normalize).filter(|k| !k.is_empty()).collect();
+    keys.sort();
+    keys.dedup();
+    keys
 }
 
 fn parse_artist(line: &[u8], ctx: &Ctx) -> Result<Record> {
@@ -54,14 +91,11 @@ fn parse_artist(line: &[u8], ctx: &Ctx) -> Result<Record> {
     let count = ctx.child_counts.get(&id).copied();
     a.release_group_count = count;
     a.tidy(ctx.supplementary);
-    let mut keys: Vec<String> = std::iter::once(a.name.as_str())
-        .chain(a.sort_name.as_deref())
-        .chain(a.aliases.iter().map(|x| x.name.as_str()))
-        .map(normalize)
-        .filter(|k| !k.is_empty())
-        .collect();
-    keys.sort();
-    keys.dedup();
+    let keys = unique_keys(
+        std::iter::once(a.name.as_str())
+            .chain(a.sort_name.as_deref())
+            .chain(a.aliases.iter().map(|x| x.name.as_str())),
+    );
     let doc = Doc {
         id,
         name: a.name.clone(),
@@ -73,6 +107,67 @@ fn parse_artist(line: &[u8], ctx: &Ctx) -> Result<Record> {
         id,
         blob: serde_json::to_vec(&a)?,
         doc,
+        parents: vec![],
+        sort: 0,
+    })
+}
+
+fn parse_release_group(line: &[u8], ctx: &Ctx) -> Result<Record> {
+    let mut g: ReleaseGroup = serde_json::from_slice(line)?;
+    let id = mbid::parse(&g.id)?;
+    let count = ctx.child_counts.get(&id).copied();
+    g.release_count = count;
+    g.tidy(ctx.supplementary);
+    let mut parents: Vec<Mbid> = g
+        .artist_credit
+        .iter()
+        .filter_map(|c| mbid::parse(&c.artist.id).ok())
+        .collect();
+    parents.sort();
+    parents.dedup();
+    let keys = unique_keys(
+        std::iter::once(g.title.as_str()).chain(g.aliases.iter().map(|x| x.name.as_str())),
+    );
+    let doc = Doc {
+        id,
+        name: g.title.clone(),
+        detail: credit_text(&g.artist_credit),
+        score: count.unwrap_or(0),
+        keys,
+    };
+    let sort = date_key(g.first_release_date.as_deref());
+    Ok(Record {
+        id,
+        blob: serde_json::to_vec(&g)?,
+        doc,
+        parents,
+        sort,
+    })
+}
+
+fn parse_release(line: &[u8], ctx: &Ctx) -> Result<Record> {
+    let mut r: Release = serde_json::from_slice(line)?;
+    let id = mbid::parse(&r.id)?;
+    r.tidy(ctx.supplementary);
+    let parents: Vec<Mbid> = r
+        .release_group
+        .iter()
+        .filter_map(|g| mbid::parse(&g.id).ok())
+        .collect();
+    let doc = Doc {
+        id,
+        name: r.title.clone(),
+        detail: credit_text(&r.artist_credit),
+        score: 0,
+        keys: unique_keys(std::iter::once(r.title.as_str())),
+    };
+    let sort = date_key(r.date.as_deref());
+    Ok(Record {
+        id,
+        blob: serde_json::to_vec(&r)?,
+        doc,
+        parents,
+        sort,
     })
 }
 
@@ -144,6 +239,8 @@ fn read_dump(path: &Path, name: &str, limit: Option<u64>, tx: &SyncSender<Batch>
 struct KindResult {
     count: u64,
     docs: Vec<Doc>,
+    /// (parent, sort key, child). Sorting these gives each parent's child list in order.
+    links: Vec<(Mbid, u32, Mbid)>,
 }
 
 fn run_kind(
@@ -163,7 +260,7 @@ fn run_kind(
     });
 
     let started = Instant::now();
-    let (mut docs, mut bad) = (Vec::new(), 0u64);
+    let (mut docs, mut links, mut bad) = (Vec::new(), Vec::new(), 0u64);
     for batch in rx {
         let batch = batch?;
         let parsed: Vec<Result<Record>> = batch.par_iter().map(|l| parse(kind, l, ctx)).collect();
@@ -171,6 +268,7 @@ fn run_kind(
         for r in parsed {
             match r {
                 Ok(rec) => {
+                    links.extend(rec.parents.iter().map(|p| (*p, rec.sort, rec.id)));
                     items.push((rec.id, rec.blob));
                     docs.push(rec.doc);
                 }
@@ -201,11 +299,34 @@ fn run_kind(
     Ok(KindResult {
         count: docs.len() as u64,
         docs,
+        links,
     })
 }
 
-/// Order matters: later passes use counts produced by earlier ones.
-const ORDER: [Kind; 1] = [Kind::Artist];
+/// Turn (parent, sort, child) links into stored child lists and remember how many each parent has.
+fn store_children(
+    rel: Rel,
+    mut links: Vec<(Mbid, u32, Mbid)>,
+    writer: &mut dyn StoreWriter,
+    counts: &mut HashMap<Mbid, u32>,
+) -> Result<()> {
+    links.sort_unstable();
+    links.dedup();
+    let mut batch: Vec<(Mbid, Vec<u8>)> = Vec::new();
+    for group in links.chunk_by(|a, b| a.0 == b.0) {
+        counts.insert(group[0].0, group.len() as u32);
+        batch.push((group[0].0, group.iter().flat_map(|l| l.2).collect()));
+        if batch.len() >= 10_000 {
+            writer.put_children(rel, &batch)?;
+            batch.clear();
+        }
+    }
+    writer.put_children(rel, &batch)
+}
+
+/// Order matters: a release group is counted by its releases and an artist by its release groups,
+/// so releases go first, then release groups, then artists.
+const ORDER: [Kind; 3] = [Kind::Release, Kind::ReleaseGroup, Kind::Artist];
 
 pub fn run(opts: &Options) -> Result<PathBuf> {
     fs::create_dir_all(&opts.out)?;
@@ -216,7 +337,7 @@ pub fn run(opts: &Options) -> Result<PathBuf> {
     fs::create_dir_all(build.join("fst"))?;
 
     let mut writer: Box<dyn StoreWriter> = Box::new(LmdbWriter::create(&build.join("store"))?);
-    let ctx = Ctx {
+    let mut ctx = Ctx {
         supplementary: opts.include_supplementary,
         child_counts: HashMap::new(),
     };
@@ -233,6 +354,9 @@ pub fn run(opts: &Options) -> Result<PathBuf> {
         let res = run_kind(kind, &path, opts, &ctx, writer.as_mut())?;
         search::build(&build.join("fst"), kind.table(), &res.docs)
             .with_context(|| format!("building {} name index", kind.api_name()))?;
+        if let Some(rel) = parent_rel(kind) {
+            store_children(rel, res.links, writer.as_mut(), &mut ctx.child_counts)?;
+        }
         counts.insert(kind.api_name().to_string(), res.count);
     }
     if counts.is_empty() {
@@ -322,5 +446,52 @@ mod tests {
         };
         assert!(parse(Kind::Artist, b"{not json", &ctx).is_err());
         assert!(parse(Kind::Artist, br#"{"id":"nope","name":"x"}"#, &ctx).is_err());
+    }
+
+    #[test]
+    fn date_keys_sort_by_date_with_missing_last() {
+        let mut keys = [
+            date_key(Some("1994-09-27")),
+            date_key(None),
+            date_key(Some("1994")),
+            date_key(Some("1993-12")),
+        ];
+        keys.sort();
+        assert_eq!(keys, [19930000 + 1200, 19940000, 19940927, u32::MAX]);
+        assert_eq!(date_key(Some("")), u32::MAX);
+    }
+
+    #[test]
+    fn fixture_has_all_kinds_and_linked_lists() {
+        let out = tempfile::tempdir().unwrap();
+        run(&fixture_opts(out.path())).unwrap();
+        let data = Data::open(&datadir::resolve(out.path()).unwrap()).unwrap();
+        for (name, file) in [
+            ("artist", "artist"),
+            ("release-group", "release-group"),
+            ("release", "release"),
+        ] {
+            let lines = fs::read_to_string(format!("tests/fixtures/dump/mbdump/{file}"))
+                .unwrap()
+                .lines()
+                .count();
+            assert_eq!(data.meta.counts[name], lines as u64, "{name}");
+        }
+        // Every release must be reachable from its release group, in sorted order.
+        let first: serde_json::Value = serde_json::from_str(
+            fs::read_to_string("tests/fixtures/dump/mbdump/release")
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        let group = mbid::parse(first["release-group"]["id"].as_str().unwrap()).unwrap();
+        let (total, ids) = data
+            .store
+            .children(Rel::ReleaseGroupReleases, &group, 0, 100)
+            .unwrap();
+        assert!(total >= 1 && ids.len() == total);
+        assert!(ids.contains(&mbid::parse(first["id"].as_str().unwrap()).unwrap()));
     }
 }

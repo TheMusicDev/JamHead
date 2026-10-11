@@ -63,6 +63,8 @@ const scenarios: Record<string, () => string> = {
   "prefix search": () => `/v1/search/${entity}?q=${encodeURIComponent(pick(names).slice(0, 4))}&limit=10`,
   "fuzzy search": () => `/v1/search/${entity}?mode=fuzzy&q=${encodeURIComponent(typo(pick(names)))}&limit=10`,
 };
+const listPath = { artist: "release-groups", "release-group": "releases" }[entity];
+if (listPath) scenarios[`${entity} ${listPath} list`] = () => `/v1/${entity}/${pick(idList)}/${listPath}?limit=25`;
 if (meta.counts?.[entity] && (await getJson(`/v1/search/${entity}?mode=text&q=a`)).error === undefined) {
   scenarios["text search"] = () => `/v1/search/${entity}?mode=text&q=${encodeURIComponent(pick(names).split(" ")[0])}&limit=10`;
 }
@@ -108,4 +110,7 @@ for (const [name, mk] of Object.entries(scenarios)) {
   const r = await run(name, mk);
   console.log(`| ${r.name} | ${r.rps} | ${r.p50.toFixed(2)} | ${r.p99.toFixed(2)} | ${r.max.toFixed(2)} | ${r.errors} |`);
 }
+const rss = Number((await Bun.$`ps -o rss= -p ${proc.pid}`.text()).trim()) / 1024;
+console.log(`\nserver memory (RSS) after the run: ${rss.toFixed(0)} MB`);
 proc.kill();
+

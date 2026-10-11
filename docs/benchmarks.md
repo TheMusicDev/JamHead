@@ -49,3 +49,32 @@ Findings worth keeping:
   distance 2 and also counts a swapped pair of letters as one typo.
 - Prefix search looks at most 20,000 matching names per query (`SCAN_CAP`). A one-letter query only sees the
   alphabetically first names. That is the cause of the p99 above and a known ceiling.
+
+## Milestone 3: release groups and releases (2026-10-11)
+
+Data: the first 20,000 releases of the 2026-10-10 dump (with `relations` emptied) plus the 17,159 release
+groups and 5,621 artists those releases point to (taken from the releases' embedded copies), so every
+parent/child list is consistent. That is a small slice (the full dump has about 5 million releases), so the
+name indexes and the LMDB file are much smaller than a real run.
+
+Ingest of all three files (1.55 GB of release JSON): **1.46 s** (about 1 GB/s of JSON), 445 MB peak memory.
+Output: LMDB store 154 MB, name indexes 3.9 MB.
+
+`oha`, 32 connections, 5 s per scenario, random IDs / names from the data:
+
+| scenario | req/s | p50 | p99 | response size |
+|---|---:|---:|---:|---:|
+| `GET /v1/release/{mbid}` | 121,700 | 0.26 ms | 0.47 ms | 3.7 KB |
+| `GET /v1/artist/{mbid}` | 122,900 | 0.25 ms | 0.56 ms | 0.4 KB |
+| `GET /v1/artist/{mbid}/release-groups?limit=25` | 121,000 | 0.25 ms | 0.72 ms | 1.3 KB |
+| prefix search, release | 108,800 | 0.26 ms | 0.93 ms | 0.6 KB |
+| prefix search, artist | 92,700 | 0.30 ms | 1.17 ms | 0.5 KB |
+| fuzzy search, release | 28,100 | 1.0 ms | 3.2 ms | 0.2 KB |
+| fuzzy search, artist | 22,900 | 1.3 ms | 3.6 ms | 0.2 KB |
+
+Reading the table: all lookups level off at about 122,000 req/s whatever the payload, which means the limit is
+the load generator and the loopback network on one machine, not the server. Treat the lookup rows as
+"at least this fast", not as the server's ceiling.
+
+Server memory after the runs (`bun run bench`): 117 MB (artist), 185 MB (release group), 198 MB (release).
+Most of that is memory-mapped file pages that the OS can drop under pressure.

@@ -2,7 +2,7 @@
 
 use crate::datadir::{self, Data};
 use crate::mbid;
-use crate::store::Kind;
+use crate::store::{Kind, Rel};
 use anyhow::Result;
 use arc_swap::ArcSwap;
 use axum::extract::{Path, Query, State};
@@ -35,6 +35,57 @@ async fn entity(State(app): State<App>, Path(id): Path<String>, kind: Kind) -> R
     };
     match app.load().store.get(kind, &id) {
         Ok(Some(blob)) => ([(header::CONTENT_TYPE, "application/json")], blob).into_response(),
+        Ok(None) => error(StatusCode::NOT_FOUND, "not found"),
+        Err(e) => {
+            eprintln!("store error: {e:#}");
+            error(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct PageParams {
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+/// A parent's child list (for example an artist's release groups) with each child's stored blob
+/// pasted in as it is. `total` counts every child the dump lists; children that were not ingested
+/// (a `--limit` sample) are left out of the page.
+async fn children(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Query(p): Query<PageParams>,
+    (parent, child, rel, field): (Kind, Kind, Rel, &'static str),
+) -> Response {
+    let Ok(id) = mbid::parse(&id) else {
+        return error(StatusCode::BAD_REQUEST, "invalid MBID");
+    };
+    let (limit, offset) = (p.limit.unwrap_or(25).clamp(1, 100), p.offset.unwrap_or(0));
+    let data = app.load();
+    let result = (|| -> anyhow::Result<Option<Vec<u8>>> {
+        if !data.store.contains(parent, &id)? {
+            return Ok(None);
+        }
+        let (total, ids) = data.store.children(rel, &id, offset, limit)?;
+        let mut body =
+            format!(r#"{{"total":{total},"offset":{offset},"limit":{limit},"{field}":["#)
+                .into_bytes();
+        let mut first = true;
+        for child_id in ids {
+            if let Some(blob) = data.store.get(child, &child_id)? {
+                if !first {
+                    body.push(b',');
+                }
+                first = false;
+                body.extend_from_slice(&blob);
+            }
+        }
+        body.extend_from_slice(b"]}");
+        Ok(Some(body))
+    })();
+    match result {
+        Ok(Some(body)) => ([(header::CONTENT_TYPE, "application/json")], body).into_response(),
         Ok(None) => error(StatusCode::NOT_FOUND, "not found"),
         Err(e) => {
             eprintln!("store error: {e:#}");
@@ -94,6 +145,30 @@ fn router(app: App) -> Router {
         r = r.route(
             &format!("/v1/{}/{{id}}", kind.api_name()),
             get(move |s: State<App>, p: Path<String>| entity(s, p, kind)),
+        );
+    }
+    let lists = [
+        (
+            Kind::Artist,
+            Kind::ReleaseGroup,
+            Rel::ArtistReleaseGroups,
+            "release-groups",
+        ),
+        (
+            Kind::ReleaseGroup,
+            Kind::Release,
+            Rel::ReleaseGroupReleases,
+            "releases",
+        ),
+    ];
+    for spec in lists {
+        r = r.route(
+            &format!("/v1/{}/{{id}}/{}", spec.0.api_name(), spec.3),
+            get(
+                move |s: State<App>, id: Path<String>, q: Query<PageParams>| {
+                    children(s, id, q, spec)
+                },
+            ),
         );
     }
     r.route("/v1/search/{entity}", get(search)).with_state(app)

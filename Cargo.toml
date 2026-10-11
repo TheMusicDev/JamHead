@@ -1,0 +1,17 @@
+[package]
+name = "jamhead"
+version = "0.1.0"
+edition = "2021"
+description = "Tiny music brains: a read-optimized MusicBrainz-style API"
+license = "MIT"
+repository = "https://github.com/TheMusicDev/JamHead"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

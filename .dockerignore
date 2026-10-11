@@ -1,0 +1,7 @@
+target
+data
+.git
+node_modules
+tests
+bench
+docs

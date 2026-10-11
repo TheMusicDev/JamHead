@@ -1,3 +1,12 @@
+mod datadir;
+mod ingest;
+mod mbid;
+mod model;
+mod norm;
+mod search;
+mod server;
+mod store;
+
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -27,12 +36,32 @@ enum Command {
         /// Only read the first N records of each dump (small dev sample).
         #[arg(long)]
         limit: Option<u64>,
+        /// Also keep tags, genres, ratings and annotations. These are CC BY-NC-SA
+        /// (non-commercial, share-alike); the default is core CC0 data only.
+        #[arg(long)]
+        include_supplementary: bool,
     },
 }
 
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
-        Command::Serve { .. } => anyhow::bail!("serve: not implemented yet"),
-        Command::Ingest { .. } => anyhow::bail!("ingest: not implemented yet"),
+        Command::Serve { data, bind } => tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?
+            .block_on(server::serve(data, bind)),
+        Command::Ingest {
+            input,
+            out,
+            limit,
+            include_supplementary,
+        } => {
+            ingest::run(&ingest::Options {
+                input,
+                out,
+                limit,
+                include_supplementary,
+            })?;
+            Ok(())
+        }
     }
 }

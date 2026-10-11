@@ -27,7 +27,7 @@ cargo fmt --check && cargo clippy -- -D warnings
 cargo run --release -- ingest --input <dumps> --out ./data --limit 50000
 cargo run --release -- serve --data ./data
 bun test tests/api        # black-box API tests against a running server
-bun run bench             # load benchmarks
+bun run bench -- --data ./data   # load benchmarks (see docs/benchmarks.md)
 docker buildx build --platform linux/arm64,linux/amd64 .
 ```
 

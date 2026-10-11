@@ -69,6 +69,13 @@ if (meta.counts?.[entity] && (await getJson(`/v1/search/${entity}?mode=text&q=a`
   scenarios["text search"] = () => `/v1/search/${entity}?mode=text&q=${encodeURIComponent(pick(names).split(" ")[0])}&limit=10`;
 }
 
+// Worst cases: one-letter prefixes (many names match) and the most common words (many documents match).
+const wordCounts = new Map<string, number>();
+for (const n of names) for (const w of n.toLowerCase().split(/\W+/)) if (w.length > 1) wordCounts.set(w, (wordCounts.get(w) ?? 0) + 1);
+const commonWords = [...wordCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([w]) => w);
+scenarios["prefix search (1 letter)"] = () => `/v1/search/${entity}?q=${pick([..."abcdefghijklmnopqrstuvwxyz"])}&limit=10`;
+if ("text search" in scenarios) scenarios["text search (common word)"] = () => `/v1/search/${entity}?mode=text&q=${pick(commonWords)}&limit=10`;
+
 if (opt["urls-dir"]) {
   const { mkdirSync, writeFileSync } = await import("node:fs");
   mkdirSync(opt["urls-dir"], { recursive: true });

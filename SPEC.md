@@ -145,3 +145,22 @@ Then add `SPEC.md` and `CLAUDE.md` to the repo root, commit, and push to `main`.
 - Exact blob fields per entity (decided after sampling the dump, in milestone 1).
 - Whether to keep supplementary (CC BY-NC-SA) fields at all.
 - Whether `/admin/reload` is needed or the symlink watch is enough.
+
+## Status and deviations (kept current as the code changes)
+
+All six milestones are built and tested, except that the full-dump run in milestone 6 was not possible on the
+development machine (disk); a 300,000-per-kind run on the real archives was done instead and the rest is an
+estimate. See `docs/benchmarks.md`. Where the code differs from this document:
+
+- **Relationship lists are separate tables**, not ID lists embedded in the blobs; blobs carry only the counts
+  (`release-group-count`, `release-count`). See `docs/schema.md` for why.
+- **Compression**: every blob is stored plain, zstd and gzip (no brotli). Chosen with `Accept-Encoding`.
+- **Reload**: all three ways are implemented: the server polls `current` (10 s default), `SIGHUP`, and
+  `POST /admin/reload` with a bearer token (off unless `--admin-token` / `JAMHEAD_ADMIN_TOKEN` is set).
+- **Supplementary data** (tags, genres, ratings, annotations) is off by default and kept only with
+  `--include-supplementary`.
+- **Final Docker image is Alpine, not scratch**, because Dokploy runs terminal and scheduled commands through a
+  shell in the container. The binary itself is fully static.
+- The data volume must be writable (LMDB keeps `lock.mdb` next to the data file).
+- `jh` is a symlink to `jamhead` in the Docker image, not a second Cargo binary.
+- Dump PGP signatures (`.asc`) are not verified; SHA256SUMS are.

@@ -222,6 +222,11 @@ pub fn stats(root: &Path) -> Result<()> {
         println!("size {part:<8} {}", human(*size));
     }
     println!("size total    {}", human(by_part.values().sum()));
+    println!("\nstore tables (entries, bytes on disk, bytes per entry):");
+    for (name, entries, bytes) in Data::open(&dir)?.store.table_sizes()? {
+        let per = bytes.checked_div(entries).unwrap_or(0);
+        println!("  {name:<20} {entries:>9} {:>10} {per:>8}", human(bytes));
+    }
     let versions = fs::read_dir(root)?
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()) && e.path().join("meta.json").exists())

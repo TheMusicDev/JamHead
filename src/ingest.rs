@@ -345,6 +345,29 @@ pub fn run(opts: &Options) -> Result<PathBuf> {
     };
     let build = opts.out.join(format!(".building-{version}"));
     let _ = fs::remove_dir_all(&build);
+    // A failed build must not leave a half-written directory behind.
+    if let Err(e) = build_into(opts, &build, &version, now) {
+        let _ = fs::remove_dir_all(&build);
+        return Err(e);
+    }
+
+    let live = opts.out.join(&version);
+    fs::rename(&build, &live)?;
+    datadir::flip_current(&opts.out, &version)?;
+    for old in datadir::prune(&opts.out, 2)? {
+        eprintln!("pruned old version {old}");
+    }
+    eprintln!("ingest done: {version}");
+    Ok(live)
+}
+
+/// Read every dump, write the store and indexes, and finish with meta.json. `build` is a new directory.
+fn build_into(
+    opts: &Options,
+    build: &Path,
+    version: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
     fs::create_dir_all(build.join("fst"))?;
 
     let mut writer: Box<dyn StoreWriter> = Box::new(LmdbWriter::create(&build.join("store"))?);
@@ -379,25 +402,18 @@ pub fn run(opts: &Options) -> Result<PathBuf> {
 
     let meta = Meta {
         schema_version: SCHEMA_VERSION,
-        data_version: version.clone(),
+        data_version: version.to_string(),
         dump_date: fs::read_to_string(opts.input.join("DUMP_DATE"))
             .ok()
             .map(|s| s.trim().to_string()),
         created_at: now.to_rfc3339(),
         supplementary: opts.include_supplementary,
         counts,
-        files: datadir::describe_files(&build)?,
+        files: datadir::describe_files(build)?,
     };
     fs::write(build.join("meta.json"), serde_json::to_vec_pretty(&meta)?)?;
 
-    let live = opts.out.join(&version);
-    fs::rename(&build, &live)?;
-    datadir::flip_current(&opts.out, &version)?;
-    for old in datadir::prune(&opts.out, 2)? {
-        eprintln!("pruned old version {old}");
-    }
-    eprintln!("ingest done: {version}");
-    Ok(live)
+    Ok(())
 }
 
 #[cfg(test)]

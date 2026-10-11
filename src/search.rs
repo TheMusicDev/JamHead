@@ -20,9 +20,19 @@ use std::sync::OnceLock;
 
 const OFFSET_BITS: u32 = 40;
 const SCORE_MAX: u64 = (1 << 24) - 1;
-// ponytail: look at most this many matching keys per query. Very short prefixes ("a") only see the
-// alphabetically first keys. Raise it, or precompute top-N per short prefix, if that ever matters.
+// ponytail: look at most this many matching keys per query. Short prefixes match huge numbers of
+// names and are the most common autocomplete queries, so they get a smaller cap (measured: a
+// one-letter query at the 20,000 cap took about 9 ms). The cap means they only see the
+// alphabetically first names. Precompute the top names for 1-2 letter prefixes if that matters.
 const SCAN_CAP: usize = 20_000;
+
+fn prefix_scan_cap(chars: usize) -> usize {
+    match chars {
+        0..=1 => 2_000,
+        2 => 5_000,
+        _ => SCAN_CAP,
+    }
+}
 
 /// What the API shows for a search hit.
 pub struct Hit {
@@ -118,6 +128,7 @@ impl NameIndex {
         if nq.is_empty() {
             return vec![];
         }
+        let cap = prefix_scan_cap(nq.chars().count());
         let mut s = self.fst.search(Str::new(&nq).starts_with()).into_stream();
         let mut found = Vec::new();
         while let Some((key, val)) = s.next() {
@@ -126,12 +137,20 @@ impl NameIndex {
                 key.len(),
                 val & ((1 << OFFSET_BITS) - 1),
             ));
-            if found.len() >= SCAN_CAP {
+            if found.len() >= cap {
                 break;
             }
         }
-        // Higher score first, then shorter (closer to what was typed).
-        found.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        // Higher score first, then shorter (closer to what was typed). Only the best few hundred
+        // keys can matter for a page of results, so do not sort the rest.
+        let best_first =
+            |a: &(u64, usize, u64), b: &(u64, usize, u64)| b.0.cmp(&a.0).then(a.1.cmp(&b.1));
+        let top = (limit * 4).max(200);
+        if found.len() > top {
+            found.select_nth_unstable_by(top, best_first);
+            found.truncate(top);
+        }
+        found.sort_by(best_first);
         self.expand(found.into_iter().map(|f| f.2), limit)
     }
 

@@ -82,6 +82,8 @@ pub trait EntityStore: Send + Sync {
     fn get(&self, kind: Kind, id: &Mbid, enc: Encoding) -> Result<Option<Vec<u8>>>;
     fn contains(&self, kind: Kind, id: &Mbid) -> Result<bool>;
     fn count(&self, kind: Kind) -> Result<u64>;
+    /// (table name, entries, bytes on disk) for every table, for `stats`.
+    fn table_sizes(&self) -> Result<Vec<(String, u64, u64)>>;
     /// Up to `n` entities in key order. Keys are random UUIDs, so this is a fair sample.
     fn sample(&self, kind: Kind, n: usize) -> Result<Vec<(Mbid, Vec<u8>)>>;
     /// One page of a parent's children: (total children, ids in the page).
@@ -168,6 +170,22 @@ impl EntityStore for LmdbStore {
         };
         let rtxn = self.env.read_txn()?;
         Ok(db.len(&rtxn)?)
+    }
+
+    fn table_sizes(&self) -> Result<Vec<(String, u64, u64)>> {
+        let rtxn = self.env.read_txn()?;
+        let mut out = Vec::new();
+        for (name, db) in &self.dbs {
+            let st = db.stat(&rtxn)?;
+            let pages = (st.branch_pages + st.leaf_pages + st.overflow_pages) as u64;
+            out.push((
+                name.to_string(),
+                st.entries as u64,
+                pages * st.page_size as u64,
+            ));
+        }
+        out.sort();
+        Ok(out)
     }
 
     fn sample(&self, kind: Kind, n: usize) -> Result<Vec<(Mbid, Vec<u8>)>> {
@@ -269,5 +287,70 @@ impl StoreWriter for LmdbWriter {
         std::fs::rename(&compact, self.dir.join("data.mdb"))?;
         let _ = std::fs::remove_file(self.dir.join("lock.mdb"));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// Not a correctness test: measures raw LMDB read speed with no HTTP in the way, to decide whether
+    /// the store could ever be the bottleneck. Run with
+    ///   JAMHEAD_BENCH_DATA=./data cargo test --release store_read_speed -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn store_read_speed() {
+        let root = std::env::var("JAMHEAD_BENCH_DATA")
+            .expect("set JAMHEAD_BENCH_DATA to a data directory");
+        let dir = crate::datadir::resolve(Path::new(&root)).unwrap();
+        let store = std::sync::Arc::new(LmdbStore::open(&dir.join("store")).unwrap());
+        for kind in Kind::ALL {
+            let ids: Vec<Mbid> = store
+                .sample(kind, 100_000)
+                .unwrap()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+            if ids.is_empty() {
+                continue;
+            }
+            for threads in [1usize, 8] {
+                let per_thread = 400_000 / threads;
+                let started = Instant::now();
+                let bytes: usize = std::thread::scope(|s| {
+                    (0..threads)
+                        .map(|t| {
+                            let (store, ids) = (store.clone(), &ids);
+                            s.spawn(move || {
+                                let mut total = 0;
+                                // A different stride per thread so they do not read the same keys in step.
+                                for i in 0..per_thread {
+                                    let id = &ids[(i * 7919 + t * 104_729) % ids.len()];
+                                    total += store
+                                        .get(kind, id, Encoding::Identity)
+                                        .unwrap()
+                                        .unwrap()
+                                        .len();
+                                }
+                                total
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .map(|h| h.join().unwrap())
+                        .sum()
+                });
+                let secs = started.elapsed().as_secs_f64();
+                let n = per_thread * threads;
+                println!(
+                    "{:<14} {threads} thread(s): {:>9.0} gets/s, {:>6.0} ns per get per thread, avg blob {} B",
+                    kind.api_name(),
+                    n as f64 / secs,
+                    secs * 1e9 * threads as f64 / n as f64,
+                    bytes / n
+                );
+            }
+        }
     }
 }

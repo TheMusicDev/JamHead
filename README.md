@@ -18,6 +18,12 @@ cargo build --release
 curl localhost:8080/v1/meta
 ```
 
+## Status
+
+All six milestones in [SPEC.md](SPEC.md) are built and tested. Measured numbers (and what is only an estimate) are in
+[docs/benchmarks.md](docs/benchmarks.md). One thing is still open: nobody has ingested the **full** MusicBrainz
+dump yet; the largest real run so far was 300,000 artists, release groups and releases.
+
 ## Commands
 
 ```

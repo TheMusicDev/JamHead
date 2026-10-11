@@ -48,7 +48,8 @@ Findings worth keeping:
   `levenshtein_automata` crate, whose expensive tables are built once at startup, gave 10,300 req/s at
   distance 2 and also counts a swapped pair of letters as one typo.
 - Prefix search looks at most 20,000 matching names per query (`SCAN_CAP`). A one-letter query only sees the
-  alphabetically first names. That is the cause of the p99 above and a known ceiling.
+  alphabetically first names. That is the cause of the p99 above and a known ceiling. (Short prefixes got a
+  smaller cap in milestone 6 after measuring them; see below.)
 
 ## Milestone 3: release groups and releases (2026-10-11)
 
@@ -129,3 +130,117 @@ against 32 connections, `current` flipped to the previous version at 3 s and bac
 1 s: **1,445,860 requests, all HTTP 200** (the 25 requests `oha` reports as "aborted due to deadline" are the
 ones still running when its 12 s ended). The slowest request was 38 ms. The same property is also a test:
 `tests/api/ops.test.ts` "the server notices a new current version by itself, without failing requests".
+
+## Milestone 6: hardening and a large real-data run (2026-10-11)
+
+### What was and was not run
+
+**A full-dump run was not done.** The full set is about 25 GB to download and tens of GB to build, and this
+machine had 3 to 24 GB of free disk while working. Instead: the real `.tar.xz` dumps (first 1.7 GB of
+`release.tar.xz`, 700 MB of `artist.tar.xz`, 260 MB of `release-group.tar.xz`, cut off with HTTP range requests)
+were ingested with `--limit 300000`, reading the compressed archives directly like a real run would.
+That is **300,000 artists + 300,000 release groups + 300,000 releases**, about 7% of the release dump.
+Everything labelled "estimate" below is a straight-line extrapolation from this run, not a measurement.
+The full run is for the real server; the commands are at the end of this section.
+
+### Ingest at this scale (Apple Silicon laptop, 10 cores, release build, unlimited input from the real dumps)
+
+| | records/s | wall time for 300k |
+|---|---:|---:|
+| releases (about 70 KB of JSON each, mostly `relations` we drop) | 3,400 to 3,600 | about 90 s |
+| release groups | 10,500 | about 28 s |
+| artists | 8,900 | about 34 s |
+| **all three, including indexes and compaction** | | **166 s** (240 s of CPU) |
+
+- Memory: the process **resident size peaked at 5.4 GB, but only about 430 MB of that is private memory**
+  (`vmmap` physical footprint, peak 432 MB). The rest is the LMDB file being written, which the kernel counts
+  as resident but can drop at any time. Plan RAM by the 430 MB figure plus file cache.
+- Output: 4.4 GB total: store 4.3 GB, name indexes (FST) 75 MB, Tantivy 64 MB.
+
+`jamhead stats` now shows the store per table:
+
+| table | entries | size | bytes per entry |
+|---|---:|---:|---:|
+| release (plain) | 300,000 | 1.9 GB | 6,821 |
+| release_zstd | 300,000 | 777 MB | 2,714 |
+| release_gzip | 300,000 | 795 MB | 2,777 |
+| release_group (plain / zstd / gzip) | 300,000 each | 186 / 126 / 128 MB | 648 / 439 / 446 |
+| artist (plain / zstd / gzip) | 300,000 each | 161 / 107 / 109 MB | 563 / 373 / 381 |
+| artist_rgs, rg_releases (child lists) | 93k, 254k | 7.4 MB, 11 MB | 83, 45 |
+
+### Serving at this scale (`oha`, 32 connections, 4 s each, all responses 200)
+
+| scenario | artist | release group | release |
+|---|---:|---:|---:|
+| ID lookup, req/s (p50 / p99) | 113,900 (0.27 / 0.55 ms) | 119,600 (0.25 / 0.71) | 114,700 (0.26 / 0.77) |
+| child list, req/s | 64,500 (0.43 / 1.6 ms) | 70,600 (0.42 / 1.2) | |
+| prefix, 3 to 4 letters | 30,400 (0.76 / 6.5) | 64,600 (0.41 / 2.3) | 92,600 (0.30 / 1.2) |
+| prefix, 1 letter (after the fix below) | 20,600 (1.4 / 3.7) | | 17,200 (1.7 / 4.0) |
+| fuzzy | 4,700 (6.3 / 16.6) | 9,600 (3.0 / 9.1) | 10,900 (2.7 / 7.4) |
+| text, first word of a name | 39,200 (0.77 / 2.0) | 34,800 (0.89 / 2.0) | 41,400 (0.75 / 1.7) |
+| text, one of the 10 most common words | 24,000 (1.3 / 3.1) | 13,700 (2.1 / 6.1) | 29,700 (1.0 / 2.9) |
+
+Server resident memory after those runs: 300 to 590 MB (mostly mapped file pages).
+
+### Findings and fixes
+
+1. **One-letter prefix search was slow** (3,262 req/s, p50 9.3 ms on artists). It scanned up to 20,000 matching
+   names and sorted them all. Now one- and two-letter queries scan at most 2,000 / 5,000 names and only the best
+   few hundred are sorted: **20,600 req/s, p50 1.4 ms** (artists), 17,200 req/s (releases; was 4,568). The price: a
+   one-letter query only ranks among the alphabetically first names. Documented in `docs/search.md`.
+2. **Fuzzy search on artists is the slowest mode** (4,700 req/s here, p99 17 ms): the automaton walks many more
+   names in a 300k-name index than in the 100k one. Fine for a typo fallback, not for per-keystroke use.
+3. **Text search on very common words** costs 2x to 3x a normal query but stays at 1 to 2 ms (p50). Not yet known
+   at 5 million releases.
+4. **Failed ingests leave nothing behind** (the half-built directory is deleted) and a cut-off `.tar.xz` is an
+   error, not silent data loss. Both are tests.
+5. `panic = "abort"` was removed: a bug that panics in one request now ends that connection, not the server.
+
+### LMDB vs a custom store: decision = keep LMDB
+
+Raw store reads with no HTTP (`cargo test --release store_read_speed -- --ignored --nocapture`, 400,000 random
+gets over the 300k-entity data):
+
+| kind (avg blob) | 1 thread | 8 threads |
+|---|---:|---:|
+| artist (353 B) | 1.06 M gets/s, 946 ns each | 7.0 M gets/s |
+| release group (410 B) | 1.06 M gets/s, 947 ns each | 7.1 M gets/s |
+| release (4.3 KB) | 0.73 M gets/s, 1.36 us each | 4.7 M gets/s |
+
+A get costs 1 to 1.4 microseconds and scales almost linearly with threads. The whole API answers about
+120,000 requests per second on this machine (the same ceiling for small and large payloads, so it looks like the
+load generator and loopback network, not the server), which is at most about 8 microseconds of wall-clock per
+request, and several cores share that work. So the store is at most one eighth of the time a request takes, and
+probably much less; a faster store could not make the API noticeably faster. **Reason to keep LMDB: speed is not a problem.**
+
+The real cost of LMDB here is **disk space**: a release's plain blob averages 4.3 KB but takes 6.8 KB on disk
+(values over about 2 KB go into whole 4 KB pages), and the zstd and gzip copies add 68% more. Options if disk
+size ever matters, cheapest first: drop the gzip copy (-18%); store only the zstd copy and decompress for plain
+requests (about -50%, costs a few microseconds per plain request); train a zstd dictionary on release JSON
+(typically a large win on small similar documents; not measured); a custom packed file (about -30% by removing page
+rounding; not worth it alone). None needs a change of storage engine, and `EntityStore` keeps that door open.
+
+### Estimates for the full dump (NOT measured: straight-line from the 300k run)
+
+| | per 1 M entities | for 5 M releases + 3 M release groups + 2.5 M artists |
+|---|---:|---:|
+| store size, releases | 11.7 GB | 58 GB |
+| store size, release groups / artists | 1.5 GB / 1.3 GB | 4.4 GB / 3.1 GB |
+| ingest time on this laptop, releases | 4.7 min | 24 min |
+| ingest time, release groups / artists | 1.6 min / 1.9 min | 5 min / 5 min |
+| ingest private memory (rough: (432 MB peak - about 220 MB base) / 300k records) | about 0.7 KB per record held for the name indexes | roughly 3 to 4 GB for the release pass |
+
+So a full update is roughly 35 minutes of ingest plus the download, and about 66 GB per data version; with three
+versions on disk while one is being built that is about 200 GB, so plan the volume accordingly (see
+`docs/deploy.md`, which needs this correction once measured).
+Unknowns only a real run can answer: latency with a cold page cache on the server's disk, text search on common
+words at 5 M releases, and whether the 4 GB name-table peak is comfortable on the target machine.
+
+To measure it on the server (inside the Dokploy container, with enough disk):
+
+```
+time jh update --data /data --dumps /data/dumps
+jh stats  --data /data
+jh verify --data /data --deep
+bun run bench -- --data /data --entity release       # from a machine with Bun; or oha, see the top of this file
+```

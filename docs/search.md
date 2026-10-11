@@ -24,6 +24,7 @@ Per entity there is an FST (`fst/<entity>.fst`) plus a postings file (`fst/<enti
 
 Known ceilings (also commented in `src/search.rs`):
 
-- At most 20,000 matching names are examined per query.
+- At most 20,000 matching names are examined per query (2,000 for a one-letter prefix, 5,000 for two letters;
+  measured in [benchmarks.md](benchmarks.md)). Short prefixes therefore rank only among the alphabetically first names.
 - Ranking is per matching name, not per entity: a low-scoring artist who shares an exact name with a
   popular one is listed right after it, before other names that have a higher score than he does.

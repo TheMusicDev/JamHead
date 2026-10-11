@@ -32,7 +32,7 @@ docker buildx build --platform linux/arm64,linux/amd64 -t <registry>/jamhead:lat
 docker buildx build --platform linux/arm64 -t jamhead:dev --load .     # one platform, into the local daemon
 ```
 
-The binary is static (about 11 MB) and sits on a plain Alpine base (whole image about 26 MB) rather than `scratch`, so
+The binary is static (about 11 MB) and sits on a plain Alpine base (whole image about 27 MB) rather than `scratch`, so
 there is a shell for Dokploy's terminal and scheduled tasks. It builds on Alpine, which is musl-native for both
 architectures, so there is no cross-compiling. The first build compiles every dependency
 (several minutes); later builds reuse the cached dependency layer until `Cargo.toml` changes.
@@ -81,15 +81,17 @@ serving and the problem is logged.
 ### Disk space
 
 Roughly: the compressed dumps (about 25 GB, deleted after each successful update) plus **three** data versions
-at the moment a new one is being built (live, previous, new; the oldest is pruned afterwards). The size of a
-full-data version has not been measured yet (milestone 6); `jh stats` prints it. Pass `--keep-dumps` to keep the
+at the moment a new one is being built (live, previous, new; the oldest is pruned afterwards). A full-data version
+has **not been measured**; extrapolating from a 300,000-per-kind run gives about 66 GB per version, so about
+200 GB while an update runs (estimate, see the end of [benchmarks.md](benchmarks.md)). `jh stats` prints the real
+size once you have one. Pass `--keep-dumps` to keep the
 downloaded dump, for example to re-ingest with different flags.
 
 ### Memory
 
 LMDB, the name indexes and the Tantivy indexes are memory-mapped, so most of the "memory" is file cache that
-the kernel can drop. Measured sizes are in [benchmarks.md](benchmarks.md). Ingest memory is a few batches of
-dump lines plus a name table; see the numbers there.
+the kernel can drop. Measured sizes are in [benchmarks.md](benchmarks.md). Ingest keeps a few batches of dump lines plus a name table for the search indexes: about 430 MB of private memory
+for 300,000 entities per kind, estimated at 3 to 4 GB for the full release dump.
 
 ### Rolling back
 

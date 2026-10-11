@@ -34,7 +34,7 @@ zstd = "0.14.2"
 lto = true
 codegen-units = 1
 strip = true
-panic = "abort"
+# Not panic = "abort": with unwinding, a bug in one request ends that connection instead of the whole server.
 
 [dev-dependencies]
 tempfile = "3.27.0"

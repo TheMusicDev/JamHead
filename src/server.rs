@@ -31,6 +31,7 @@ type App = Arc<AppState>;
 // Data only changes when a new version is swapped in, and the ETag contains the version, so a
 // short browser/CDN cache plus revalidation by ETag is safe.
 const CACHE_CONTROL: &str = "public, max-age=300";
+const MAX_QUERY_CHARS: usize = 200;
 
 fn error(status: StatusCode, msg: &str) -> Response {
     (status, Json(json!({ "error": msg }))).into_response()
@@ -226,6 +227,10 @@ async fn search(
     let Some(q) = p.q.filter(|q| !q.trim().is_empty()) else {
         return error(StatusCode::BAD_REQUEST, "missing q");
     };
+    // Names are short; a very long query is a mistake or an attack and costs real work to match.
+    if q.chars().count() > MAX_QUERY_CHARS {
+        return error(StatusCode::BAD_REQUEST, "q is too long");
+    }
     let limit = p.limit.unwrap_or(10).clamp(1, 100);
     let mode = p.mode.unwrap_or_else(|| "prefix".into());
     let data = app.data.load();

@@ -21,6 +21,10 @@ For the full catalog, **plan for about 250 GB of free disk**:
   pass `--keep-dumps`).
 - The old versions are only pruned after the new one is live.
 
+Tight on disk? `--keep-versions 1` (on `ingest` and `update`) deletes the previous version as soon as the new one
+is live. Peak disk is then the live version plus the new one (about 135 GB, plus 25 GB of dumps), at the price of
+having no version to roll back to. The very first build needs only about 90 GB (one version plus the dumps).
+
 The 66 GB and the 250 GB are extrapolations from the 300,000-per-kind run, not measurements. Nobody has run the
 full catalog yet. After a real run, `jamhead stats` prints the true sizes; please correct this table.
 
@@ -110,6 +114,59 @@ curl localhost:8080/v1/meta
 
 The image declares a health check (`jamhead healthcheck`, every 30 s). Until the first data version exists `serve`
 exits with "no data ... run `jamhead ingest` first".
+
+## Synology NAS (DS923+ class)
+
+**Serving** fits any NAS that runs Container Manager (Docker): it needs about 0.5 GB of private memory plus whatever
+file cache the kernel gives it. **Ingesting the full catalog on a stock 4 GB DS923+ is untested and probably will
+not fit**, for two reasons that are estimates, not measurements:
+
+- *Memory.* Ingest keeps every record's search name in RAM while it runs. 300,000 per kind used about 430 MB, and
+  the full catalog is roughly 4 times that. DSM itself uses about 1 GB. A 16 GB RAM upgrade is the simple fix.
+- *Disk speed.* Records are written in dump order but keyed by random IDs, so every write lands at a random spot in
+  a file of tens of GB. That is fine on an SSD and may be very slow on a spinning disk. Nobody has timed it on
+  an HDD yet.
+
+So do it in steps and look at the numbers before the next one:
+
+1. Build the amd64 image on a Mac and copy it over (no registry needed):
+
+   ```
+   docker buildx build --platform linux/amd64 -t jamhead:dev --load .
+   docker save jamhead:dev | ssh nas 'docker load'      # or: docker save -o jh.tar, then Container Manager > Image > Import
+   ```
+
+2. On the NAS (SSH), make a folder on the volume you want, for example `/volume1/docker/jamhead/{data,dumps}`.
+   It must be writable by the container.
+3. Smallest trial, using the partial download recipe under "Small data sets" (about 150 MB), then:
+
+   ```
+   docker run --rm -v /volume1/docker/jamhead/dumps/sample:/in:ro -v /volume1/docker/jamhead/data:/data \
+     jamhead:dev ingest --input /in --out /data --limit 10000
+   ```
+
+4. Serve it. Container Manager > Project, or `docker compose up -d` with:
+
+   ```yaml
+   services:
+     jamhead:
+       image: jamhead:dev
+       restart: unless-stopped
+       ports: ["8080:8080"]
+       volumes: ["/volume1/docker/jamhead/data:/data"]
+   ```
+
+5. Grow to 300,000 per kind and then the full catalog. While `update` runs, watch memory and disk in another
+   terminal (`docker stats`, `iostat`), and write what you see into [benchmarks.md](benchmarks.md):
+
+   ```
+   docker run --rm -v /volume1/docker/jamhead/data:/data -v /volume1/docker/jamhead/dumps:/dumps \
+     jamhead:dev update --data /data --dumps /dumps --keep-versions 1
+   ```
+
+The running server picks up the new version within 10 s, so the compose service does not need a restart.
+If `docker stats` shows memory climbing toward the limit during ingest, stop it (a failed ingest leaves the live
+version untouched) and either add RAM or ask for the low-memory ingest change.
 
 ## Keeping data fresh
 

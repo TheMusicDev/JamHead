@@ -162,4 +162,6 @@ estimate. See `docs/benchmarks.md`. Where the code differs from this document:
 - **Final Docker image is Alpine, not scratch**, so there is a shell in the container for `docker exec` and rollbacks. The binary itself is fully static.
 - The data volume must be writable (LMDB keeps `lock.mdb` next to the data file).
 - `jh` is a symlink to `jamhead` in the Docker image, not a second Cargo binary.
+- `ingest` and `update` take `--keep-versions N` (default 2: live plus one for rollback). `1` frees the previous
+  version right after the flip, for hosts that cannot hold three versions.
 - Dump PGP signatures (`.asc`) are not verified; SHA256SUMS are.

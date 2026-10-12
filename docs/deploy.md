@@ -196,15 +196,47 @@ Set up:
    - **`mem_limit: 3g`** caps the update container so a runaway ingest is killed on its own instead of starving DSM
      (4 GB total, about 1 GB used by DSM). Raise it if you have more RAM. If it is killed, a half-built
      `.building-...` folder may be left in `data/`; delete it by hand in File Station.
-   - Watch the project's *Log* tab for progress and *Container Manager > Container* for memory.
+   - Read the log under *Container Manager > Container > (click the container) > Log*, and press the refresh
+     icon at the bottom right (it does not update itself). The project page has no log tab. Memory and CPU are on the
+     container's *Statistics* tab.
    - The running `jamhead` server picks the new version up within 10 s, with no restart.
-4. To refresh later, start `jamhead-update` again (or schedule it in *Control Panel > Task Scheduler* with the
+4. **Changing the version.** Editing the image tag in the YAML is not enough: DSM does not pull the new image on
+   *Start*, and a project in that state can get stuck (it still looks "running", and Stop, Clean and Restart do
+   nothing). Do it in this order: *Stop* the project, edit the YAML, press **Action > Build** (this pulls the new
+   image and recreates the container), then *Start*. If a project is already stuck, stopping and starting the
+   Container Manager package in *Package Center* clears DSM's stale state (it stops every container on the NAS for a
+   minute). Your `data` and `dumps` folders are never touched by any of this.
+5. To refresh later, start `jamhead-update` again (or schedule it in *Control Panel > Task Scheduler* with the
    command `docker start jamhead-update-update-1`; check the exact container name in Container Manager).
 
 **HTTPS.** JamHead speaks plain HTTP and has no login. On a home network that is fine. Before exposing it beyond
 your LAN, put DSM's reverse proxy in front (*Control Panel > Login Portal > Advanced > Reverse Proxy*: HTTPS
 on your hostname to HTTP `localhost:8080`, with a certificate from *Control Panel > Security > Certificate*). Web
 Station is not needed for that. Menu names from memory.
+
+**Reading the log.** `update` and `ingest` print plain lines, one per update:
+
+```
+Reading releases from release.tar.xz (22.0 GB). This is the slow part.
+Reading releases: 12% (about 55 min left) (610000 records so far, 958/s)
+Reading releases: done, 5012345 records in 1 h 5 min
+Building search indexes for releases (a few minutes, no progress lines)...
+Writing release records to the database, in order...
+  release: 25% written
+Compacting the database (one more copy ...). This can be quiet for a while...
+DONE in 2 h 14 min. Data version v... is now the live one.
+```
+
+- **Finished** means a line starting with `DONE`. On a failure the last line starts with `FAILED:` and says why.
+- **The container stops by itself when it is done** (status Exited, code 0).
+- **"About N left"** is a guess from the speed so far and is only printed after the first 20 seconds. Percent is the
+  share of the compressed dump file that has been read.
+- **Quiet stretches are normal** before the lines that say "no progress lines" or "can be quiet": checking a big
+  file's checksum, building indexes and compacting each take minutes without printing.
+- **If the container ends without a DONE or FAILED line**, it was killed from outside, most likely by the memory
+  cap (`mem_limit`). Look in the `data` folder for a leftover `.building-...` folder and delete it.
+- **While ingesting, the build folder needs extra temporary space**, roughly 40% of the finished data size
+  (an estimate, see [benchmarks.md](benchmarks.md)); it is freed as it is written.
 
 Plan the first run in steps, and write what you measure into [benchmarks.md](benchmarks.md): a small data set
 first (see the roadmap: a `sample` option is planned so this needs no terminal), then 300,000 per kind, then the

@@ -99,9 +99,9 @@ Ingest design: one parser + one builder per entity type behind a common trait, s
 ## Docker and deploy
 
 - Multi-stage `Dockerfile`: Rust build stage (use `cargo-chef` or similar for layer caching), final stage `scratch`/`distroless` containing only the binary.
-- Target both `linux/arm64` (Oracle Cloud A1.Flex via Dokploy) and `linux/amd64`. Document the `buildx` command.
+- Target both `linux/arm64` and `linux/amd64`. Document the `buildx` command. (No production host has been chosen yet.)
 - Data is a mounted volume, never baked into the image.
-- The same image runs `serve` (long-running) and `update` (scheduled job). Document the Dokploy setup: one app with a volume, plus a scheduled task for `jh update`.
+- The same image runs `serve` (long-running) and `update` (scheduled job). Document how to run it with a volume and a scheduled `jh update`.
 - Keep memory predictable: LMDB is mmap'd, FSTs are loaded or mmap'd, and the Tantivy readers are shared.
 
 ## Local development
@@ -127,7 +127,7 @@ The owner knows Bun/TypeScript, not Rust, so correctness is defined in TypeScrip
 2. **Artists end to end.** Ingest artist dump -> LMDB + FST, serve `GET /v1/artist/{mbid}` and prefix search, Bun API tests, first benchmark.
 3. **Release groups and releases.** Add both entity builders, the relationship ID lists, and the list endpoints.
 4. **Search.** Add Tantivy full-text and fuzzy modes, unify the `/v1/search/{entity}` endpoint.
-5. **Operations.** `download` and `update`, atomic swap and reload, `verify`, compression, ETags, Dokploy deployment docs.
+5. **Operations.** `download` and `update`, atomic swap and reload, `verify`, compression, ETags, deployment docs.
 6. **Hardening.** Full-dump run on the real data, memory/latency profiling, decide whether LMDB should be replaced behind the `EntityStore` trait.
 
 ## Repo setup (first step for Claude Code)
@@ -145,3 +145,23 @@ Then add `SPEC.md` and `CLAUDE.md` to the repo root, commit, and push to `main`.
 - Exact blob fields per entity (decided after sampling the dump, in milestone 1).
 - Whether to keep supplementary (CC BY-NC-SA) fields at all.
 - Whether `/admin/reload` is needed or the symlink watch is enough.
+
+## Status and deviations (kept current as the code changes)
+
+All six milestones are built and tested, except that the full-dump run in milestone 6 was not possible on the
+development machine (disk); a 300,000-per-kind run on the real archives was done instead and the rest is an
+estimate. See `docs/benchmarks.md`. Where the code differs from this document:
+
+- **Relationship lists are separate tables**, not ID lists embedded in the blobs; blobs carry only the counts
+  (`release-group-count`, `release-count`). See `docs/schema.md` for why.
+- **Compression**: every blob is stored plain, zstd and gzip (no brotli). Chosen with `Accept-Encoding`.
+- **Reload**: all three ways are implemented: the server polls `current` (10 s default), `SIGHUP`, and
+  `POST /admin/reload` with a bearer token (off unless `--admin-token` / `JAMHEAD_ADMIN_TOKEN` is set).
+- **Supplementary data** (tags, genres, ratings, annotations) is off by default and kept only with
+  `--include-supplementary`.
+- **Final Docker image is Alpine, not scratch**, so there is a shell in the container for `docker exec` and rollbacks. The binary itself is fully static.
+- The data volume must be writable (LMDB keeps `lock.mdb` next to the data file).
+- `jh` is a symlink to `jamhead` in the Docker image, not a second Cargo binary.
+- `ingest` and `update` take `--keep-versions N` (default 2: live plus one for rollback). `1` frees the previous
+  version right after the flip, for hosts that cannot hold three versions.
+- Dump PGP signatures (`.asc`) are not verified; SHA256SUMS are.

@@ -1,0 +1,12 @@
+{
+  "name": "jamhead-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test tests/api",
+    "bench": "bun run bench/run.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}

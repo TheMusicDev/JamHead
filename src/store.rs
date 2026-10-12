@@ -214,8 +214,12 @@ impl EntityStore for LmdbStore {
         let rtxn = self.env.read_txn()?;
         let packed = db.get(&rtxn, parent)?.unwrap_or(&[]);
         let total = packed.len() / 16;
-        let page = packed.chunks_exact(16).skip(offset).take(limit);
-        Ok((total, page.map(|c| c.try_into().unwrap()).collect()))
+        // The list is a run of 16-byte ids; as_chunks hands them out as [u8; 16].
+        let (ids, _) = packed.as_chunks::<16>();
+        Ok((
+            total,
+            ids.iter().skip(offset).take(limit).copied().collect(),
+        ))
     }
 }
 

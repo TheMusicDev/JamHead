@@ -1,6 +1,6 @@
 [package]
 name = "jamhead"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Tiny music brains: a read-optimized MusicBrainz-style API"
 license = "MIT"

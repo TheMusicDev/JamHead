@@ -16,6 +16,7 @@ JamHead is a read-optimized, MusicBrainz-style API (artists, release groups, rel
 - Ingest must stream. Never load a whole dump file into memory.
 - Never modify a live data directory. Always build a new versioned directory and flip the `current` symlink.
 - Keep storage behind the `EntityStore` trait.
+- Keep `docs/roadmap.md` current: tick items off when they land and write new ideas there, not just in chat.
 - Respect data licensing: core fields only by default, supplementary (CC BY-NC-SA) fields behind an explicit flag.
 
 ## Commands (keep this section current)
@@ -31,6 +32,7 @@ cargo run --release -- verify --data ./data   # integrity check
 bun test tests/api        # black-box API tests against a running server
 bun run bench -- --data ./data   # load benchmarks (see docs/benchmarks.md)
 docker buildx build --platform linux/arm64,linux/amd64 .
+git tag vX.Y.Z && git push origin vX.Y.Z   # publishes ghcr.io/themusicdev/jamhead:X.Y.Z (tag must match Cargo.toml)
 ```
 
 ## Definition of done for any change

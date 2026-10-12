@@ -91,6 +91,22 @@ The full `download` fetches whole files, so it cannot be used for a small trial.
 
 ## Docker image
 
+Released versions are published to the GitHub Container Registry for both `linux/amd64` (Intel/AMD, most NAS and
+servers) and `linux/arm64` (Apple silicon, Raspberry Pi), so `docker pull` picks the right one by itself:
+
+```
+docker pull ghcr.io/themusicdev/jamhead:0.1.0
+```
+
+- Tags are exact versions only (`0.1.0`). There is no `latest` and no `0.1`: pin the version you run, so you
+  always know what is running and upgrading is a deliberate edit.
+- A version is published by pushing a tag that matches `Cargo.toml` (`git tag v0.1.0 && git push origin v0.1.0`),
+  which runs `.github/workflows/publish.yml`. Pushes to `main` never publish.
+- The first time a version is published, check the package's visibility on GitHub (the repository's *Packages*
+  section). It must be **public** for a NAS to pull it without logging in.
+
+To build your own instead (development, or a platform not published):
+
 ```
 docker buildx build --platform linux/arm64,linux/amd64 -t <registry>/jamhead:latest --push .
 docker buildx build --platform linux/arm64 -t jamhead:dev --load .     # one platform, into the local daemon
@@ -117,9 +133,13 @@ exits with "no data ... run `jamhead ingest` first".
 
 ## Synology NAS (DS923+ class)
 
-**Serving** fits any NAS that runs Container Manager (Docker): it needs about 0.5 GB of private memory plus whatever
-file cache the kernel gives it. **Ingesting the full catalog on a stock 4 GB DS923+ is untested and probably will
-not fit**, for two reasons that are estimates, not measurements:
+Everything below uses only the DSM web interface (Container Manager). Nothing is built or copied by hand: DSM pulls
+the published image itself. **Not yet tried on a real NAS**; the DSM menu names are from memory, so correct this
+page after the first run.
+
+**Serving** needs about 0.5 GB of private memory plus whatever file cache the kernel gives it. **Ingesting the
+full catalog on a stock 4 GB DS923+ is untested and probably will not fit**, for two reasons that are estimates,
+not measurements:
 
 - *Memory.* Ingest keeps every record's search name in RAM while it runs. 300,000 per kind used about 430 MB, and
   the full catalog is roughly 4 times that. DSM itself uses about 1 GB. A 16 GB RAM upgrade is the simple fix.
@@ -127,45 +147,43 @@ not fit**, for two reasons that are estimates, not measurements:
   a file of tens of GB. That is fine on an SSD and may be very slow on a spinning disk. Nobody has timed it on
   an HDD yet.
 
-So do it in steps and look at the numbers before the next one:
+Set up:
 
-1. Build the amd64 image on a Mac and copy it over (no registry needed):
-
-   ```
-   docker buildx build --platform linux/amd64 -t jamhead:dev --load .
-   docker save jamhead:dev | ssh nas 'docker load'      # or: docker save -o jh.tar, then Container Manager > Image > Import
-   ```
-
-2. On the NAS (SSH), make a folder on the volume you want, for example `/volume1/docker/jamhead/{data,dumps}`.
-   It must be writable by the container.
-3. Smallest trial, using the partial download recipe under "Small data sets" (about 150 MB), then:
-
-   ```
-   docker run --rm -v /volume1/docker/jamhead/dumps/sample:/in:ro -v /volume1/docker/jamhead/data:/data \
-     jamhead:dev ingest --input /in --out /data --limit 10000
-   ```
-
-4. Serve it. Container Manager > Project, or `docker compose up -d` with:
+1. In *File Station*, create the folders `docker/jamhead/data` and `docker/jamhead/dumps` on the volume you want.
+2. In *Container Manager > Project > Create*, name it `jamhead`, choose the path `docker/jamhead` and paste this
+   as the compose file. Pin an exact version; DSM downloads the image when the project starts.
 
    ```yaml
    services:
      jamhead:
-       image: jamhead:dev
+       image: ghcr.io/themusicdev/jamhead:0.1.0
        restart: unless-stopped
        ports: ["8080:8080"]
        volumes: ["/volume1/docker/jamhead/data:/data"]
    ```
 
-5. Grow to 300,000 per kind and then the full catalog. While `update` runs, watch memory and disk in another
-   terminal (`docker stats`, `iostat`), and write what you see into [benchmarks.md](benchmarks.md):
+   Until a data version exists the container stops with "no data ... run `jamhead ingest` first". That is expected.
+3. Build the data with a second project, `jamhead-update`, that runs once and exits. Create it the same way with:
 
-   ```
-   docker run --rm -v /volume1/docker/jamhead/data:/data -v /volume1/docker/jamhead/dumps:/dumps \
-     jamhead:dev update --data /data --dumps /dumps --keep-versions 1
+   ```yaml
+   services:
+     update:
+       image: ghcr.io/themusicdev/jamhead:0.1.0
+       restart: "no"
+       command: ["update", "--data", "/data", "--dumps", "/dumps", "--keep-versions", "1"]
+       volumes:
+         - /volume1/docker/jamhead/data:/data
+         - /volume1/docker/jamhead/dumps:/dumps
    ```
 
-The running server picks up the new version within 10 s, so the compose service does not need a restart.
-If `docker stats` shows memory climbing toward the limit during ingest, stop it (a failed ingest leaves the live
+   Open the project's log view to watch progress, and *Container Manager > Container* for memory. The running
+   `jamhead` server picks the new version up within 10 s; it does not need a restart.
+4. To refresh later, start `jamhead-update` again (or schedule it in *Control Panel > Task Scheduler* with the
+   command `docker start jamhead-update-update-1`; check the exact container name in Container Manager).
+
+Plan the first run in steps, and write what you measure into [benchmarks.md](benchmarks.md): a small data set
+first (see the roadmap: a `sample` option is planned so this needs no terminal), then 300,000 per kind, then the
+full catalog. If memory climbs toward the limit during ingest, stop the project (a failed ingest leaves the live
 version untouched) and either add RAM or ask for the low-memory ingest change.
 
 ## Keeping data fresh

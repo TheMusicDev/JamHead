@@ -36,7 +36,8 @@ jamhead stats    --data ./data
 ```
 
 `jh` is an alias for `jamhead` in the Docker image. Requirements (**the full catalog needs about 250 GB of disk**), Docker, scheduled updates and rollback are in
-[docs/deploy.md](docs/deploy.md).
+[docs/deploy.md](docs/deploy.md). Published images: `ghcr.io/themusicdev/jamhead:<version>`
+(exact versions only, no `latest`). What is planned next: [docs/roadmap.md](docs/roadmap.md).
 
 ## API
 

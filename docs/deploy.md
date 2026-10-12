@@ -172,21 +172,32 @@ Set up:
    NAS). Because of `restart: unless-stopped` it then restarts and stops over and over, which is harmless but
    noisy: stop the project until data exists. The log is under *Container Manager > Container > (the container) >
    Details > Log*, or the project's *Log* tab.
-3. Build the data with a second project, `jamhead-update`, that runs once and exits. Create it the same way with:
+3. Build the data with a second project, `jamhead-update`, that runs once and exits. DSM allows only one
+   `compose.yaml` per project folder, so give it its own folder (Path `/shared-apps/jamhead-update`). Its volumes
+   still point at the same `data` folder as the server, so both projects share one data directory:
 
    ```yaml
    services:
      update:
        image: ghcr.io/themusicdev/jamhead:0.1.0
        restart: "no"
+       mem_limit: 3g
        command: ["update", "--data", "/data", "--dumps", "/dumps", "--keep-versions", "1"]
        volumes:
          - /volume1/shared-apps/jamhead/data:/data
          - /volume1/shared-apps/jamhead/dumps:/dumps
    ```
 
-   Open the project's log view to watch progress, and *Container Manager > Container* for memory. The running
-   `jamhead` server picks the new version up within 10 s; it does not need a restart.
+   - **It finishes by itself.** It downloads the dumps, ingests, prints `ingest done: v...` and
+     `now serving-ready: ...`, then exits (status *Exited*, code 0). Nothing needs stopping.
+   - **Why two projects, not one.** Starting a project starts every service in it, so one merged file could rerun
+     the update (a new 25 GB download and a full ingest) whenever the project is restarted. The server should stay
+     up for months; the update is a rare job of hours.
+   - **`mem_limit: 3g`** caps the update container so a runaway ingest is killed on its own instead of starving DSM
+     (4 GB total, about 1 GB used by DSM). Raise it if you have more RAM. If it is killed, a half-built
+     `.building-...` folder may be left in `data/`; delete it by hand in File Station.
+   - Watch the project's *Log* tab for progress and *Container Manager > Container* for memory.
+   - The running `jamhead` server picks the new version up within 10 s, with no restart.
 4. To refresh later, start `jamhead-update` again (or schedule it in *Control Panel > Task Scheduler* with the
    command `docker start jamhead-update-update-1`; check the exact container name in Container Manager).
 

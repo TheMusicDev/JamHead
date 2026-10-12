@@ -134,8 +134,8 @@ exits with "no data ... run `jamhead ingest` first".
 ## Synology NAS (DS923+ class)
 
 Everything below uses only the DSM web interface (Container Manager). Nothing is built or copied by hand: DSM pulls
-the published image itself. **Not yet tried on a real NAS**; the DSM menu names are from memory, so correct this
-page after the first run.
+the published image itself. Steps 1 and 2 were run on a real NAS (version 0.1.0, image pulled and started). Step 3
+onward is still untried, so treat its menu names as from memory.
 
 **Serving** needs about 0.5 GB of private memory plus whatever file cache the kernel gives it. **Ingesting the
 full catalog on a stock 4 GB DS923+ is untested and probably will not fit**, for two reasons that are estimates,
@@ -149,9 +149,15 @@ not measurements:
 
 Set up:
 
-1. In *File Station*, create the folders `docker/jamhead/data` and `docker/jamhead/dumps` on the volume you want.
-2. In *Container Manager > Project > Create*, name it `jamhead`, choose the path `docker/jamhead` and paste this
-   as the compose file. Pin an exact version; DSM downloads the image when the project starts.
+1. In *File Station*, create the folders `data` and `dumps` inside a shared folder of your choice (the examples use
+   a shared folder called `shared-apps`, so `shared-apps/jamhead/data` and `shared-apps/jamhead/dumps`). Create
+   them yourself so they are not made by Docker as root-owned folders.
+2. In *Container Manager > Project > Create*, name it `jamhead`. The **Path** is the project's own folder (where DSM
+   keeps its `compose.yaml`), as a shared-folder path such as `/shared-apps/jamhead`. It is not a volume. Choose
+   *Create docker-compose.yml* as the source and paste the file below. Pin an exact version; DSM downloads the image
+   when the project starts. In the compose file the same place is written with its volume, `/volume1/shared-apps/...`.
+   On the *Web portal settings* screen, **untick** "Set up web portal via Web Station": it is not needed to reach
+   the API at `http://<NAS-IP>:8080` and asks you to install Web Station.
 
    ```yaml
    services:
@@ -159,10 +165,13 @@ Set up:
        image: ghcr.io/themusicdev/jamhead:0.1.0
        restart: unless-stopped
        ports: ["8080:8080"]
-       volumes: ["/volume1/docker/jamhead/data:/data"]
+       volumes: ["/volume1/shared-apps/jamhead/data:/data"]
    ```
 
-   Until a data version exists the container stops with "no data ... run `jamhead ingest` first". That is expected.
+   Until a data version exists the container stops with "no data ... run `jamhead ingest` first" (seen on a real
+   NAS). Because of `restart: unless-stopped` it then restarts and stops over and over, which is harmless but
+   noisy: stop the project until data exists. The log is under *Container Manager > Container > (the container) >
+   Details > Log*, or the project's *Log* tab.
 3. Build the data with a second project, `jamhead-update`, that runs once and exits. Create it the same way with:
 
    ```yaml
@@ -172,14 +181,19 @@ Set up:
        restart: "no"
        command: ["update", "--data", "/data", "--dumps", "/dumps", "--keep-versions", "1"]
        volumes:
-         - /volume1/docker/jamhead/data:/data
-         - /volume1/docker/jamhead/dumps:/dumps
+         - /volume1/shared-apps/jamhead/data:/data
+         - /volume1/shared-apps/jamhead/dumps:/dumps
    ```
 
    Open the project's log view to watch progress, and *Container Manager > Container* for memory. The running
    `jamhead` server picks the new version up within 10 s; it does not need a restart.
 4. To refresh later, start `jamhead-update` again (or schedule it in *Control Panel > Task Scheduler* with the
    command `docker start jamhead-update-update-1`; check the exact container name in Container Manager).
+
+**HTTPS.** JamHead speaks plain HTTP and has no login. On a home network that is fine. Before exposing it beyond
+your LAN, put DSM's reverse proxy in front (*Control Panel > Login Portal > Advanced > Reverse Proxy*: HTTPS
+on your hostname to HTTP `localhost:8080`, with a certificate from *Control Panel > Security > Certificate*). Web
+Station is not needed for that. Menu names from memory.
 
 Plan the first run in steps, and write what you measure into [benchmarks.md](benchmarks.md): a small data set
 first (see the roadmap: a `sample` option is planned so this needs no terminal), then 300,000 per kind, then the

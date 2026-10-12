@@ -1,6 +1,8 @@
 // Helpers shared by the API tests: build a data directory from the checked-in fixture
 // dump, start a real `jamhead serve`, and read the fixture back for expected values.
 
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -103,6 +105,8 @@ export interface Mirror {
   requests: { path: string; range: string | null }[];
   /** Serve different bytes for this file name (to test checksum failures). */
   tamper: Set<string>;
+  /** The next full download of this file name breaks the connection halfway (once). */
+  dropOnce: Set<string>;
   stop(): void;
 }
 
@@ -126,28 +130,55 @@ export async function startMirror(date = "20261010-001001"): Promise<Mirror> {
 
   const requests: Mirror["requests"] = [];
   const tamper = new Set<string>();
-  const server = Bun.serve({
-    port: 0,
-    fetch(req) {
-      const path = new URL(req.url).pathname;
-      const range = req.headers.get("range");
-      requests.push({ path, range });
-      let bytes = files.get(path);
-      if (!bytes) return new Response("not found", { status: 404 });
-      if (tamper.has(path.split("/").pop()!)) {
-        bytes = bytes.slice();
-        bytes[bytes.length - 1] ^= 0xff;
+  const dropOnce = new Set<string>();
+  // node:http rather than Bun.serve, because a test needs to cut a connection mid-body.
+  const server = createServer((req, res) => {
+    const path = new URL(req.url!, "http://x").pathname;
+    const range = req.headers.range ?? null;
+    requests.push({ path, range });
+    let bytes = files.get(path);
+    if (!bytes) {
+      res.writeHead(404).end("not found");
+      return;
+    }
+    const name = path.split("/").pop()!;
+    if (tamper.has(name)) {
+      bytes = bytes.slice();
+      bytes[bytes.length - 1] ^= 0xff;
+    }
+    if (dropOnce.has(name)) {
+      // Promise the whole file, send half of it, then break the connection (once).
+      dropOnce.delete(name);
+      res.writeHead(200, { "content-length": bytes.length });
+      // Cut the socket itself: res.destroy() makes Bun append stray header bytes to the body.
+      res.write(bytes.slice(0, Math.floor(bytes.length / 2)), () => req.socket.destroy());
+      return;
+    }
+    const m = range?.match(/^bytes=(\d+)-$/);
+    if (m) {
+      const start = Number(m[1]);
+      if (start >= bytes.length) {
+        res.writeHead(416).end();
+        return;
       }
-      const m = range?.match(/^bytes=(\d+)-$/);
-      if (m) {
-        const start = Number(m[1]);
-        if (start >= bytes.length) return new Response("", { status: 416 });
-        return new Response(bytes.slice(start), { status: 206 });
-      }
-      return new Response(bytes);
-    },
+      res.writeHead(206).end(bytes.slice(start));
+      return;
+    }
+    res.writeHead(200).end(bytes);
   });
-  return { url: `http://127.0.0.1:${server.port}`, date, requests, tamper, stop: () => server.stop(true) };
+  await new Promise<void>((ok) => server.listen(0, "127.0.0.1", ok));
+  const port = (server.address() as AddressInfo).port;
+  return {
+    url: `http://127.0.0.1:${port}`,
+    date,
+    requests,
+    tamper,
+    dropOnce,
+    stop: () => {
+      server.closeAllConnections();
+      server.close();
+    },
+  };
 }
 
 export async function waitFor<T>(what: string, fn: () => Promise<T | undefined | false>, ms = 8000): Promise<T> {

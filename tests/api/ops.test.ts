@@ -230,6 +230,26 @@ describe("download and update", () => {
     }
   });
 
+  test("a connection that breaks halfway is resumed and the file still verifies", async () => {
+    const mirror = await startMirror();
+    try {
+      mirror.dropOnce.add("release.tar.xz");
+      const out = tmp();
+      const r = await run(["download", "--out", out, "--base-url", mirror.url]);
+      expect(r.code).toBe(0);
+      expect(r.stderr).toContain("connection broke");
+      // The retry asked for the rest of the file, not the whole file again.
+      const rel = mirror.requests.filter((q) => q.path.endsWith("release.tar.xz"));
+      expect(rel.length).toBe(2);
+      expect(rel[1].range).toMatch(/^bytes=\d+-$/);
+      const dir = join(out, mirror.date);
+      expect(existsSync(join(dir, "release.tar.xz"))).toBe(true);
+      expect(existsSync(join(dir, "release.tar.xz.part"))).toBe(false);
+    } finally {
+      mirror.stop();
+    }
+  });
+
   test("a download that fails its checksum is rejected and deleted", async () => {
     const mirror = await startMirror();
     try {

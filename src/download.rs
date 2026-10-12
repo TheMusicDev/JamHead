@@ -28,11 +28,15 @@ pub struct Options {
 
 fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
-        // Dumps are tens of GB: no overall limit, but give up if the server goes quiet.
+        // Dumps are tens of GB, so there is no time limit on the body. `timeout_recv_body` caps the
+        // WHOLE body (it is not restarted per read), so any value would kill a big download midway:
+        // 120 s cut off the 22 GB release dump at about 2.3 GB. A broken connection is handled by
+        // retrying and resuming instead (see `fetch_file`).
+        // ponytail: a connection that stays open but sends nothing is not detected; Ctrl-C and rerun resumes.
         .timeout_global(None)
         .timeout_connect(Some(Duration::from_secs(30)))
         .timeout_recv_response(Some(Duration::from_secs(60)))
-        .timeout_recv_body(Some(Duration::from_secs(120)))
+        .timeout_recv_body(None)
         .http_status_as_error(false)
         .build()
         .into()
@@ -73,6 +77,9 @@ fn parse_sums(text: &str) -> HashMap<String, String> {
         .collect()
 }
 
+const MAX_TRIES: u32 = 8;
+const RETRY_PAUSE: Duration = Duration::from_secs(5);
+
 fn fetch_file(agent: &ureq::Agent, url: &str, dest: &Path, expected: &str) -> Result<()> {
     if dest.exists() {
         if sha256_file(dest)? == expected {
@@ -82,20 +89,35 @@ fn fetch_file(agent: &ureq::Agent, url: &str, dest: &Path, expected: &str) -> Re
         fs::remove_file(dest)?;
     }
     let part = PathBuf::from(format!("{}.part", dest.display()));
-    for attempt in 0..2 {
+    // Each pass resumes from whatever is already in the .part file, so a broken connection
+    // costs only the bytes since the last write.
+    for attempt in 0..MAX_TRIES {
         let have = fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
         let mut req = agent.get(url);
         if have > 0 {
             req = req.header("Range", format!("bytes={have}-"));
         }
-        let mut res = req.call().with_context(|| format!("GET {url}"))?;
+        let mut res = match req.call() {
+            Ok(res) => res,
+            // Right after a dropped connection the network may still be down: wait and try again.
+            Err(e) if attempt + 1 < MAX_TRIES => {
+                eprintln!(
+                    "{}: {e}; try {} of {MAX_TRIES}, again in 5 s",
+                    dest.display(),
+                    attempt + 1
+                );
+                std::thread::sleep(RETRY_PAUSE);
+                continue;
+            }
+            Err(e) => return Err(e).with_context(|| format!("GET {url}")),
+        };
         let mut file = match res.status().as_u16() {
             206 => {
                 eprintln!("{}: resuming at {} MB", dest.display(), have >> 20);
                 OpenOptions::new().append(true).open(&part)?
             }
             200 => File::create(&part)?, // fresh download, or the server ignored the Range header
-            416 if attempt == 0 => {
+            416 => {
                 // We already have all the bytes. If they check out we are done, else start over.
                 if sha256_file(&part)? == expected {
                     fs::rename(&part, dest)?;
@@ -106,7 +128,16 @@ fn fetch_file(agent: &ureq::Agent, url: &str, dest: &Path, expected: &str) -> Re
             }
             s => bail!("GET {url}: HTTP {s}"),
         };
-        copy_with_progress(res.body_mut().as_reader(), &mut file, dest)?;
+        if let Err(e) = copy_with_progress(res.body_mut().as_reader(), &mut file, dest) {
+            eprintln!(
+                "{}: connection broke ({e:#}); try {} of {MAX_TRIES}, resuming in 5 s",
+                dest.display(),
+                attempt + 1
+            );
+            drop(file);
+            std::thread::sleep(RETRY_PAUSE);
+            continue;
+        }
         file.flush()?;
         drop(file);
         let got = sha256_file(&part)?;
@@ -184,5 +215,14 @@ mod tests {
         let m = super::parse_sums("abc123  artist.tar.xz\ndef456 *release.tar.xz\n\n");
         assert_eq!(m["artist.tar.xz"], "abc123");
         assert_eq!(m["release.tar.xz"], "def456");
+    }
+
+    #[test]
+    fn a_big_download_is_never_cut_off_by_a_time_limit() {
+        // The body timeout covers the whole body, so ANY value kills a long download (it once cut
+        // the 22 GB release dump off after 2 minutes).
+        let agent = super::agent();
+        assert!(agent.config().timeouts().recv_body.is_none());
+        assert!(agent.config().timeouts().global.is_none());
     }
 }

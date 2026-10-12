@@ -89,6 +89,16 @@ impl Blob {
         })
     }
 
+    /// Only the uncompressed JSON. Ingest spools these and the writer compresses them later, when it
+    /// puts them in the database (so the work is not done twice).
+    pub fn plain_only(plain: Vec<u8>) -> Blob {
+        Blob {
+            plain,
+            zstd: Vec::new(),
+            gzip: Vec::new(),
+        }
+    }
+
     pub fn get(&self, enc: Encoding) -> &[u8] {
         match enc {
             Encoding::Identity => &self.plain,

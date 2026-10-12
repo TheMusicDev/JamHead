@@ -6,6 +6,7 @@ mod mbid;
 mod model;
 mod norm;
 mod ops;
+mod progress;
 mod search;
 mod server;
 mod store;
@@ -135,7 +136,14 @@ fn kinds(names: &[String]) -> anyhow::Result<Vec<store::Kind>> {
         .collect()
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("FAILED: {e:#}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Serve {
             data,

@@ -243,6 +243,7 @@ pub struct UpdateOptions {
     pub dumps: PathBuf,
     pub limit: Option<u64>,
     pub include_supplementary: bool,
+    pub keep_versions: usize,
     pub keep_dumps: bool,
     pub force: bool,
 }
@@ -275,6 +276,7 @@ pub fn update(o: &UpdateOptions) -> Result<()> {
         out: o.data.clone(),
         limit: o.limit,
         include_supplementary: o.include_supplementary,
+        keep_versions: o.keep_versions,
     })?;
     if !o.keep_dumps {
         fs::remove_dir_all(&dump_dir)?;

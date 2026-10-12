@@ -28,6 +28,8 @@ pub struct Options {
     pub out: PathBuf,
     pub limit: Option<u64>,
     pub include_supplementary: bool,
+    /// How many versions to keep once the new one is live (the live one counts).
+    pub keep_versions: usize,
 }
 
 /// Read-only facts shared by all parser threads.
@@ -359,7 +361,7 @@ pub fn run(opts: &Options) -> Result<PathBuf> {
     let live = opts.out.join(&version);
     fs::rename(&build, &live)?;
     datadir::flip_current(&opts.out, &version)?;
-    for old in datadir::prune(&opts.out, 2)? {
+    for old in datadir::prune(&opts.out, opts.keep_versions)? {
         eprintln!("pruned old version {old}");
     }
     eprintln!("ingest done: {version}");
@@ -433,6 +435,7 @@ mod tests {
             out: out.to_path_buf(),
             limit: None,
             include_supplementary: false,
+            keep_versions: 2,
         }
     }
 

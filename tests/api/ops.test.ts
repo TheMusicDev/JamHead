@@ -63,6 +63,21 @@ describe("versions", () => {
     expect(versions(root).sort()).toEqual(seen.slice(-2).sort());
     expect((await run(["verify", "--data", root])).code).toBe(0);
   });
+
+  test("--keep-versions 1 leaves only the live version", async () => {
+    const root = await ingest();
+    const r = await run(["ingest", "--input", FIXTURE_DIR, "--out", root, "--limit", "5", "--keep-versions", "1"]);
+    expect(r.code).toBe(0);
+    expect(versions(root)).toEqual([readlinkSync(join(root, "current"))]);
+    expect((await run(["verify", "--data", root])).code).toBe(0);
+  });
+
+  test("--keep-versions 0 is refused", async () => {
+    const root = await ingest();
+    const r = await run(["ingest", "--input", FIXTURE_DIR, "--out", root, "--keep-versions", "0"]);
+    expect(r.code).not.toBe(0);
+    expect(versions(root).length).toBe(1);
+  });
 });
 
 describe("reload while serving", () => {

@@ -75,6 +75,10 @@ enum Command {
         limit: Option<u64>,
         #[arg(long)]
         include_supplementary: bool,
+        /// Versions to keep after the new one is live (2 = live + one for rollback).
+        /// 1 saves about 66 GB at full size but leaves no rollback.
+        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u64).range(1..))]
+        keep_versions: u64,
         /// Keep the downloaded dump after a successful ingest (it is deleted by default).
         #[arg(long)]
         keep_dumps: bool,
@@ -113,6 +117,10 @@ enum Command {
         /// (non-commercial, share-alike); the default is core CC0 data only.
         #[arg(long)]
         include_supplementary: bool,
+        /// Versions to keep after the new one is live (2 = live + one for rollback).
+        /// 1 saves about 66 GB at full size but leaves no rollback.
+        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u64).range(1..))]
+        keep_versions: u64,
     },
 }
 
@@ -168,6 +176,7 @@ fn main() -> anyhow::Result<()> {
             base_url,
             limit,
             include_supplementary,
+            keep_versions,
             keep_dumps,
             force,
         } => ops::update(&ops::UpdateOptions {
@@ -178,6 +187,7 @@ fn main() -> anyhow::Result<()> {
             dumps,
             limit,
             include_supplementary,
+            keep_versions: keep_versions as usize,
             keep_dumps,
             force,
         }),
@@ -195,12 +205,14 @@ fn main() -> anyhow::Result<()> {
             out,
             limit,
             include_supplementary,
+            keep_versions,
         } => {
             ingest::run(&ingest::Options {
                 input,
                 out,
                 limit,
                 include_supplementary,
+                keep_versions: keep_versions as usize,
             })?;
             Ok(())
         }

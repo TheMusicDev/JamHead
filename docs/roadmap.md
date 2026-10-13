@@ -4,21 +4,31 @@ What is left after milestones 1 to 6 (see [SPEC.md](../SPEC.md)), in the order I
 current: tick things off here when they land, and add new ideas at the bottom instead of leaving them in chat.
 Items that change the storage design need the owner's approval before work starts.
 
-## Now: get it onto the NAS without a terminal
+## Done
+
+- Milestones 1 to 6 and `--keep-versions` (PR #1).
+- Versioned images on GHCR from a version tag (#2, PR #3). Published: `0.1.0`, `0.1.1`, `0.1.2` (amd64 and arm64).
+- Synology steps written from a real NAS (PR #16).
+- `0.1.1`: big downloads were cut off after 2 minutes; now no time limit, retry and resume (PR #17).
+- `0.1.2`: ingest writes records in id order (for spinning disks, [#8](https://github.com/TheMusicDev/JamHead/issues/8)) and prints plain-English progress with percent and time left ([#19](https://github.com/TheMusicDev/JamHead/issues/19), PR #20).
+- `0.1.3` (once tagged): fixes "Too many open files" on macOS (the 0.1.2 writer held up to 768 files open; macOS allows 256), and times over a minute show seconds.
+
+## Now: build the full catalog and get it onto the NAS
 
 | # | What | Why this position | Status |
 |---|---|---|---|
-| 1 | **Publish versioned images to GHCR on a version tag** ([#2](https://github.com/TheMusicDev/JamHead/issues/2)) | The NAS (or any host) can then just point at `ghcr.io/themusicdev/jamhead:<version>`. Nothing else is deployable without it. | in progress: workflow and docs written, needs a first tag (`v0.1.0`) to prove it |
-| 2 | **Make the first tag, check the package is public, pull it on the NAS** | Proves #1 end to end, including the amd64 image on real hardware (so far it was only built, never load-tested). | after #1 merges |
-| 3 | **A `sample` option so a small data set needs no terminal.** Fetch only the start of each dump (HTTP range request), build a linked-up data set of N releases plus the release groups and artists they belong to, about 100 MB | Today a small trial needs hand-typed `curl` commands. In Container Manager the only other choice is a 25 GB download. Without this the NAS trial would have to start with the full catalog. | not started, no issue yet |
+| 1 | **Build the full catalog on a Mac with a fast external SSD** (`update --dump 20261010-001001`), then `verify` | The stock NAS slowed to a crawl building it itself (see `docs/benchmarks.md`). A Mac with plenty of RAM and SSD does not have that problem. | in progress: downloads done and checked, first ingest hit the open-files bug fixed in 0.1.3 |
+| 2 | **Copy the finished version folder to the NAS and run `verify` there** | Proves that data built on a Mac (Apple silicon, arm64) opens on the NAS (x86, amd64). Untested: try it with a small 300,000 build first. Also work out how the NAS points `current` at the copied folder. | after #1 |
+| 3 | **Pull the image on the NAS and start `serve` on that data** ([#4](https://github.com/TheMusicDev/JamHead/issues/4)) | Pull and start were proven; the healthcheck on real data is not. | after #2 and the `v0.1.3` tag |
+| 4 | **Record real numbers** (Mac build time and size, NAS memory) in `docs/benchmarks.md` and correct the estimates in `docs/deploy.md` ([#6](https://github.com/TheMusicDev/JamHead/issues/6)) | Every full-size number in the docs is still an estimate. | after #1 to #3 |
+| 5 | **Decide whether the NAS can build updates itself** ([#8](https://github.com/TheMusicDev/JamHead/issues/8), [#7](https://github.com/TheMusicDev/JamHead/issues/7)) | The 0.1.2 writer should fix the slowdown, but it has only been tested where everything fits in RAM. Run a `--limit 300000` update on the NAS with 0.1.3 and watch the speed stay flat. Close #8 only if it does. | after the `v0.1.3` tag |
 
-## Then: measure on the NAS and fix what the numbers show
+## Next
 
-| # | What | Why this position | Status |
-|---|---|---|---|
-| 4 | **NAS ramp-up:** small sample, then 300,000 per kind, then the full catalog. Record memory, disk speed and time in `docs/benchmarks.md`; correct the estimates in `docs/deploy.md` | Every full-size number in the docs is an estimate. The stock DS923+ (4 GB RAM, spinning disks) is the likely worst case. | needs #2 and #3 |
-| 5 | **Lower ingest memory:** write the search names to a temp file instead of keeping them all in RAM | Expected to be needed for 4 GB. Do it only if #4 shows memory is the limit. | waiting on #4 |
-| 6 | **HDD-friendly ingest:** sort records by key before writing, so the disk is written in order instead of at random spots | Expected to matter on spinning disks. Changes how ingest writes into LMDB (not the file format): ask the owner first. | waiting on #4, needs approval |
+- Tag `v0.1.3`, then update the `0.1.0` / `0.1.1` pins in `docs/deploy.md` to it.
+- A `sample` option so a small data set needs no terminal ([#5](https://github.com/TheMusicDev/JamHead/issues/5)).
+- Useful JSON at `/` instead of an empty 404 ([#18](https://github.com/TheMusicDev/JamHead/issues/18)).
+- Lower ingest memory, only if the NAS numbers show memory is the limit ([#7](https://github.com/TheMusicDev/JamHead/issues/7)).
 
 ## Housekeeping (small, any time)
 

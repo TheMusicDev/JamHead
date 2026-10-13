@@ -18,10 +18,12 @@ use anyhow::{bail, Context, Result};
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender};
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 pub struct Options {
     pub input: PathBuf,
@@ -111,7 +113,7 @@ fn parse_artist(line: &[u8], ctx: &Ctx) -> Result<Record> {
     };
     Ok(Record {
         id,
-        blob: Blob::new(serde_json::to_vec(&a)?)?,
+        blob: Blob::plain_only(serde_json::to_vec(&a)?),
         doc,
         parents: vec![],
         sort: 0,
@@ -144,7 +146,7 @@ fn parse_release_group(line: &[u8], ctx: &Ctx) -> Result<Record> {
     let sort = date_key(g.first_release_date.as_deref());
     Ok(Record {
         id,
-        blob: Blob::new(serde_json::to_vec(&g)?)?,
+        blob: Blob::plain_only(serde_json::to_vec(&g)?),
         doc,
         parents,
         sort,
@@ -170,7 +172,7 @@ fn parse_release(line: &[u8], ctx: &Ctx) -> Result<Record> {
     let sort = date_key(r.date.as_deref());
     Ok(Record {
         id,
-        blob: Blob::new(serde_json::to_vec(&r)?)?,
+        blob: Blob::plain_only(serde_json::to_vec(&r)?),
         doc,
         parents,
         sort,
@@ -223,8 +225,31 @@ fn feed<R: BufRead>(mut r: R, limit: Option<u64>, tx: &SyncSender<Batch>) -> Res
     Ok(())
 }
 
-fn read_dump(path: &Path, name: &str, limit: Option<u64>, tx: &SyncSender<Batch>) -> Result<()> {
-    let file = File::open(path)?;
+/// Counts the bytes read from the dump file, so progress can be shown as a share of the file size.
+struct CountingRead<R> {
+    inner: R,
+    count: Arc<AtomicU64>,
+}
+
+impl<R: Read> Read for CountingRead<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.count.fetch_add(n as u64, Ordering::Relaxed);
+        Ok(n)
+    }
+}
+
+fn read_dump(
+    path: &Path,
+    name: &str,
+    limit: Option<u64>,
+    tx: &SyncSender<Batch>,
+    count: Arc<AtomicU64>,
+) -> Result<()> {
+    let file = CountingRead {
+        inner: File::open(path)?,
+        count,
+    };
     if path.to_string_lossy().ends_with(".tar.xz") {
         let xz = xz2::read::XzDecoder::new_multi_decoder(BufReader::with_capacity(1 << 20, file));
         let mut archive = tar::Archive::new(xz);
@@ -259,8 +284,19 @@ fn run_kind(
     let (tx, rx) = sync_channel::<Batch>(2);
     let name = kind.api_name();
     let (limit, reader_path) = (opts.limit, path.to_path_buf());
+    let label = format!("{}s", name.replace('-', " "));
+    let file_size = fs::metadata(path)?.len();
+    let read_bytes = Arc::new(AtomicU64::new(0));
+    let reader_bytes = read_bytes.clone();
+    eprintln!(
+        "Reading {label} from {} ({}). This is the slow part.",
+        path.file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default(),
+        crate::progress::human_size(file_size)
+    );
     let reader = std::thread::spawn(move || {
-        if let Err(e) = read_dump(&reader_path, name, limit, &tx) {
+        if let Err(e) = read_dump(&reader_path, name, limit, &tx, reader_bytes) {
             let hint =
                 "the file may be cut off (an unfinished download?); use --limit to stop earlier";
             let _ = tx.send(Err(e.context(format!(
@@ -272,6 +308,7 @@ fn run_kind(
 
     let started = Instant::now();
     let (mut docs, mut links, mut bad) = (Vec::new(), Vec::new(), 0u64);
+    let mut next_report = Duration::from_secs(10);
     for batch in rx {
         let batch = batch?;
         let parsed: Vec<Result<Record>> = batch.par_iter().map(|l| parse(kind, l, ctx)).collect();
@@ -292,10 +329,20 @@ fn run_kind(
             }
         }
         writer.put_batch(kind, &items)?;
-        if docs.len() % 100_000 < items.len() {
+        if started.elapsed() >= next_report {
+            next_report = started.elapsed() + Duration::from_secs(30);
             let secs = started.elapsed().as_secs_f64().max(0.001);
+            // With --limit the share is records out of the limit; otherwise the share of the file read.
+            let fraction = match limit {
+                Some(l) if l > 0 => docs.len() as f64 / l as f64,
+                _ => read_bytes.load(Ordering::Relaxed) as f64 / file_size.max(1) as f64,
+            };
+            let left = crate::progress::time_left(fraction, secs)
+                .map(|t| format!(", about {t} left"))
+                .unwrap_or_default();
             eprintln!(
-                "{name}: {} records ({:.0}/s)",
+                "Reading {label}: {:.0}%{left} ({} records so far, {:.0}/s)",
+                (fraction * 100.0).min(100.0),
                 docs.len(),
                 docs.len() as f64 / secs
             );
@@ -305,8 +352,15 @@ fn run_kind(
         .join()
         .map_err(|_| anyhow::anyhow!("reader thread panicked"))?;
     if bad > 0 {
-        eprintln!("{name}: skipped {bad} unreadable lines");
+        eprintln!(
+            "Warning: skipped {bad} unreadable lines in the {name} dump (everything else was kept)"
+        );
     }
+    eprintln!(
+        "Reading {label}: done, {} records in {}",
+        docs.len(),
+        crate::progress::human_time(started.elapsed().as_secs())
+    );
     Ok(KindResult {
         count: docs.len() as u64,
         docs,
@@ -340,6 +394,7 @@ fn store_children(
 const ORDER: [Kind; 3] = [Kind::Release, Kind::ReleaseGroup, Kind::Artist];
 
 pub fn run(opts: &Options) -> Result<PathBuf> {
+    let run_started = Instant::now();
     fs::create_dir_all(&opts.out)?;
     // Versions are named by the second; if one already exists (two quick runs), wait for the next.
     let (now, version) = loop {
@@ -364,7 +419,10 @@ pub fn run(opts: &Options) -> Result<PathBuf> {
     for old in datadir::prune(&opts.out, opts.keep_versions)? {
         eprintln!("pruned old version {old}");
     }
-    eprintln!("ingest done: {version}");
+    eprintln!(
+        "DONE in {}. Data version {version} is now the live one.",
+        crate::progress::human_time(run_started.elapsed().as_secs())
+    );
     Ok(live)
 }
 
@@ -386,13 +444,17 @@ fn build_into(
     for kind in ORDER {
         let Some(path) = locate(&opts.input, kind.api_name()) else {
             eprintln!(
-                "{}: no dump found in {}, skipping",
+                "No {} dump found in {}, skipping it",
                 kind.api_name(),
                 opts.input.display()
             );
             continue;
         };
         let res = run_kind(kind, &path, opts, &ctx, writer.as_mut())?;
+        eprintln!(
+            "Building search indexes for {}s (a few minutes, no progress lines)...",
+            kind.api_name().replace('-', " ")
+        );
         search::build(&build.join("fst"), kind.table(), &res.docs)
             .with_context(|| format!("building {} name index", kind.api_name()))?;
         text::build(&build.join("tantivy"), kind.table(), &res.docs)
@@ -407,6 +469,7 @@ fn build_into(
     }
     writer.finish()?;
 
+    eprintln!("Checksumming the new files, so `verify` can spot damage later...");
     let meta = Meta {
         schema_version: SCHEMA_VERSION,
         data_version: version.to_string(),

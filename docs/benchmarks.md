@@ -244,3 +244,39 @@ jh stats  --data /data
 jh verify --data /data --deep
 bun run bench -- --data /data --entity release       # from a machine with Bun; or oha, see the top of this file
 ```
+
+## First full-catalog attempt on a NAS: ingest slows down (2026-10-12)
+
+**Measured** on a Synology DS923+ (4 GB RAM, spinning disks, shared with other users and services), Docker image
+0.1.1, real MusicBrainz dump 20261010-001001, container capped at 3 GB. The three dumps downloaded and verified
+(about 25 GB); then the release pass of `update` was timed from its own log lines:
+
+| records ingested | log time | average since the start |
+|---:|---|---:|
+| 100,517 | 17:43 | 958 / s |
+| 200,295 | 17:46 | 807 / s |
+| 300,443 | 18:11 | 170 / s |
+
+The third batch of 100,000 took 25 minutes (about 67 / s). While it slowed down, the container's CPU fell from
+100 to 250% to about 10% and its memory stayed flat at about 1.3 GB, so it was waiting, not computing. The run was
+stopped: at that speed, and falling, the full catalog would not finish in any useful time.
+
+**Cause (a likely explanation, not proven on the NAS):** ingest wrote each record into LMDB in dump order, but
+keys are random ids, so every insert landed at a random place in a file that grows to tens of GB. While the file
+fits in the page cache that is fast (the laptop runs above); once it does not, each insert costs a disk seek.
+`NO_SYNC` was already on, so it was not flushing. The disks are shared with other machines, so some of the
+slowdown may come from them, but a 14x drop within 30 minutes matches the growth effect.
+
+**Change:** ingest now spools each record into one of 256 temporary files (by the first byte of its id, which is
+random, so they come out about equal) and writes them into LMDB one file at a time, sorted, so the database is
+filled front to back (`src/store.rs`). Peak extra disk while ingesting is the uncompressed JSON of the kind being
+written, roughly 40% of the finished store (estimate from the plain / zstd / gzip table sizes), freed as each file is
+written. The finished data is identical in layout.
+
+**Checked on a laptop (SSD, fits in RAM, so it cannot show the NAS problem):** 300,000 real release groups from the
+real dump ingested in 14 s including compaction; `jamhead verify --deep` 26 checks, 0 failed; all three blob tables
+hold 300,000 entries. All Rust and Bun tests pass unchanged.
+
+**Not yet proven:** that the NAS now keeps its speed past 300,000 records. To check, rerun on the NAS
+(`ingest` or `update`, smaller catalog first) and watch whether the "records so far / s" figure in the log stays
+roughly flat. Record the result here.

@@ -6,8 +6,12 @@ use crate::mbid::Mbid;
 use anyhow::{Context, Result};
 use heed::types::Bytes;
 use heed::{CompactionOption, Database, Env, EnvFlags, EnvOpenOptions};
+use rayon::prelude::*;
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
@@ -223,10 +227,20 @@ impl EntityStore for LmdbStore {
     }
 }
 
+/// Ingest does not write blobs into LMDB in dump order. The ids are random, so doing that puts every
+/// insert at a random place in a file of tens of GB: fast while it fits in RAM, then a disk seek per
+/// insert (on a NAS with spinning disks a full run slowed from 958 records/s to about 67/s and kept
+/// falling). Instead `put_batch` appends each record to one of 256 spool files, chosen by the first
+/// byte of its id, and `finish` writes the files into LMDB one at a time in id order. Ids are random,
+/// so the files come out about the same size, each is small enough to sort in memory, and LMDB is
+/// filled front to back.
+const BUCKETS: usize = 256;
+
 pub struct LmdbWriter {
     dir: PathBuf,
     env: Env,
     dbs: HashMap<&'static str, Database<Bytes, Bytes>>,
+    spool: HashMap<Kind, Vec<BufWriter<File>>>,
 }
 
 impl LmdbWriter {
@@ -254,20 +268,92 @@ impl LmdbWriter {
             dir: dir.to_path_buf(),
             env,
             dbs,
+            spool: HashMap::new(),
         })
     }
+
+    fn spool_dir(&self, kind: Kind) -> PathBuf {
+        self.dir.join("spool").join(kind.table())
+    }
+
+    /// Move one kind's spooled records into LMDB, bucket by bucket in id order.
+    fn write_kind(&mut self, kind: Kind) -> Result<()> {
+        let Some(mut files) = self.spool.remove(&kind) else {
+            return Ok(());
+        };
+        for f in &mut files {
+            f.flush()?;
+        }
+        drop(files);
+        let dir = self.spool_dir(kind);
+        let name = kind.api_name().replace('-', " ");
+        eprintln!("Writing {name} records to the database, in order...");
+        let started = Instant::now();
+        for bucket in 0..BUCKETS {
+            let path = dir.join(format!("{bucket:02x}"));
+            let bytes = std::fs::read(&path)?;
+            std::fs::remove_file(&path)?;
+            let mut items = unspool(&bytes)?;
+            // A stable sort: if an id ever appears twice, the later record is written last and wins.
+            items.sort_by_key(|(id, _)| *id);
+            // Compression happens here, in parallel, instead of while parsing.
+            let blobs: Vec<(Mbid, Blob)> = items
+                .par_iter()
+                .map(|(id, plain)| Ok((*id, Blob::new(plain.to_vec())?)))
+                .collect::<Result<_>>()?;
+            let mut wtxn = self.env.write_txn()?;
+            for enc in Encoding::ALL {
+                let db = self.dbs[kind.blob_table(enc)];
+                for (id, blob) in &blobs {
+                    db.put(&mut wtxn, id, blob.get(enc))?;
+                }
+            }
+            wtxn.commit()?;
+            if (bucket + 1) % 32 == 0 {
+                let done = (bucket + 1) as f64 / BUCKETS as f64;
+                let left = crate::progress::time_left(done, started.elapsed().as_secs_f64())
+                    .map(|t| format!(", about {t} left"))
+                    .unwrap_or_default();
+                eprintln!("  {name}: {:.0}% written{left}", done * 100.0);
+            }
+        }
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+}
+
+/// Split a spool file into (id, plain JSON) records: 16 id bytes, a little-endian u32 length, the bytes.
+fn unspool(mut bytes: &[u8]) -> Result<Vec<(Mbid, &[u8])>> {
+    let mut out = Vec::new();
+    while !bytes.is_empty() {
+        anyhow::ensure!(bytes.len() >= 20, "spool file is cut off");
+        let id: Mbid = bytes[..16].try_into()?;
+        let len = u32::from_le_bytes(bytes[16..20].try_into()?) as usize;
+        anyhow::ensure!(bytes.len() >= 20 + len, "spool file is cut off");
+        out.push((id, &bytes[20..20 + len]));
+        bytes = &bytes[20 + len..];
+    }
+    Ok(out)
 }
 
 impl StoreWriter for LmdbWriter {
     fn put_batch(&mut self, kind: Kind, items: &[(Mbid, Blob)]) -> Result<()> {
-        let mut wtxn = self.env.write_txn()?;
-        for enc in Encoding::ALL {
-            let db = self.dbs[kind.blob_table(enc)];
-            for (id, blob) in items {
-                db.put(&mut wtxn, id, blob.get(enc))?;
-            }
+        if !self.spool.contains_key(&kind) {
+            let dir = self.spool_dir(kind);
+            std::fs::create_dir_all(&dir)?;
+            let files = (0..BUCKETS)
+                .map(|b| File::create(dir.join(format!("{b:02x}"))).map(BufWriter::new))
+                .collect::<std::io::Result<Vec<_>>>()?;
+            self.spool.insert(kind, files);
         }
-        wtxn.commit()?;
+        let files = self.spool.get_mut(&kind).expect("just inserted");
+        for (id, blob) in items {
+            let plain = blob.get(Encoding::Identity);
+            let file = &mut files[id[0] as usize];
+            file.write_all(id)?;
+            file.write_all(&(plain.len() as u32).to_le_bytes())?;
+            file.write_all(plain)?;
+        }
         Ok(())
     }
 
@@ -281,7 +367,12 @@ impl StoreWriter for LmdbWriter {
         Ok(())
     }
 
-    fn finish(self: Box<Self>) -> Result<()> {
+    fn finish(mut self: Box<Self>) -> Result<()> {
+        for kind in Kind::ALL {
+            self.write_kind(kind)?;
+        }
+        let _ = std::fs::remove_dir(self.dir.join("spool")); // empty by now
+        eprintln!("Compacting the database (one more copy, so it is smaller and laid out in order). This can be quiet for a while...");
         self.env.force_sync()?;
         // Writing in batches leaves unused pages behind. Copy to a compacted file and swap it in:
         // smaller on disk and laid out in order for the readers.

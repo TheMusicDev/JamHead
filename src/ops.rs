@@ -264,7 +264,7 @@ pub fn update(o: &UpdateOptions) -> Result<()> {
             return Ok(());
         }
     }
-    println!("updating to dump {date}");
+    println!("Updating to MusicBrainz dump {date}.");
     let dump_dir = download::run(&download::Options {
         base_url: o.base_url.clone(),
         dump: date,
@@ -281,7 +281,10 @@ pub fn update(o: &UpdateOptions) -> Result<()> {
     if !o.keep_dumps {
         fs::remove_dir_all(&dump_dir)?;
     }
-    println!("now serving-ready: {}", version.display());
+    println!(
+        "The new data is in {}. A running server switches to it within 10 seconds; if none is running, start one.",
+        version.display()
+    );
     Ok(())
 }
 

@@ -82,8 +82,12 @@ const RETRY_PAUSE: Duration = Duration::from_secs(5);
 
 fn fetch_file(agent: &ureq::Agent, url: &str, dest: &Path, expected: &str) -> Result<()> {
     if dest.exists() {
+        eprintln!(
+            "{}: found a finished file, checking its checksum (a big file takes a few minutes)...",
+            short(dest)
+        );
         if sha256_file(dest)? == expected {
-            eprintln!("{}: already downloaded and verified", dest.display());
+            eprintln!("{}: already downloaded and verified", short(dest));
             return Ok(());
         }
         fs::remove_file(dest)?;
@@ -113,7 +117,11 @@ fn fetch_file(agent: &ureq::Agent, url: &str, dest: &Path, expected: &str) -> Re
         };
         let mut file = match res.status().as_u16() {
             206 => {
-                eprintln!("{}: resuming at {} MB", dest.display(), have >> 20);
+                eprintln!(
+                    "{}: resuming from {} (a restarted download keeps what it already has)",
+                    short(dest),
+                    crate::progress::human_size(have)
+                );
                 OpenOptions::new().append(true).open(&part)?
             }
             200 => File::create(&part)?, // fresh download, or the server ignored the Range header
@@ -128,7 +136,27 @@ fn fetch_file(agent: &ureq::Agent, url: &str, dest: &Path, expected: &str) -> Re
             }
             s => bail!("GET {url}: HTTP {s}"),
         };
-        if let Err(e) = copy_with_progress(res.body_mut().as_reader(), &mut file, dest) {
+        // The server says how many bytes are coming; add what we already have for the full size.
+        let total = res
+            .headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|len| {
+                if res.status().as_u16() == 206 {
+                    have + len
+                } else {
+                    len
+                }
+            });
+        let start = if res.status().as_u16() == 206 {
+            have
+        } else {
+            0
+        };
+        if let Err(e) =
+            copy_with_progress(res.body_mut().as_reader(), &mut file, dest, start, total)
+        {
             eprintln!(
                 "{}: connection broke ({e:#}); try {} of {MAX_TRIES}, resuming in 5 s",
                 dest.display(),
@@ -140,6 +168,10 @@ fn fetch_file(agent: &ureq::Agent, url: &str, dest: &Path, expected: &str) -> Re
         }
         file.flush()?;
         drop(file);
+        eprintln!(
+            "{}: downloaded, checking its checksum (a big file takes a few minutes)...",
+            short(dest)
+        );
         let got = sha256_file(&part)?;
         if got != expected {
             fs::remove_file(&part)?;
@@ -149,32 +181,47 @@ fn fetch_file(agent: &ureq::Agent, url: &str, dest: &Path, expected: &str) -> Re
             );
         }
         fs::rename(&part, dest)?;
+        eprintln!("{}: checksum OK", short(dest));
         return Ok(());
     }
     bail!("{}: could not download", dest.display())
 }
 
-fn copy_with_progress(mut from: impl Read, to: &mut File, dest: &Path) -> Result<()> {
+/// Copy the body to the file, printing a progress line every 5 seconds. `start` is how many bytes
+/// were already on disk, and `total` the full file size when the server told us.
+fn copy_with_progress(
+    mut from: impl Read,
+    to: &mut File,
+    dest: &Path,
+    start: u64,
+    total: Option<u64>,
+) -> Result<()> {
     let mut buf = vec![0u8; 1 << 20];
-    let (mut total, mut last, started) = (0u64, Instant::now(), Instant::now());
+    let (mut copied, mut last, started) = (0u64, Instant::now(), Instant::now());
     loop {
         let n = from.read(&mut buf)?;
         if n == 0 {
             break;
         }
         to.write_all(&buf[..n])?;
-        total += n as u64;
+        copied += n as u64;
         if last.elapsed() > Duration::from_secs(5) {
             last = Instant::now();
-            let rate = total as f64 / started.elapsed().as_secs_f64() / 1e6;
+            let rate = copied as f64 / started.elapsed().as_secs_f64();
             eprintln!(
-                "{}: {} MB this run ({rate:.1} MB/s)",
-                dest.display(),
-                total >> 20
+                "{}",
+                crate::progress::progress_line(&short(dest), start + copied, total, rate)
             );
         }
     }
     Ok(())
+}
+
+/// Just the file name, for readable log lines.
+fn short(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 /// Download the requested dumps and return the directory they are in.

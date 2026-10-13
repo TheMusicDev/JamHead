@@ -12,12 +12,12 @@ pub fn human_size(bytes: u64) -> String {
 pub fn human_time(secs: u64) -> String {
     match secs {
         0..=59 => format!("{secs} s"),
-        60..=3599 => format!("{} min", secs.div_ceil(60)),
+        60..=3599 => format!("{} min {} s", secs / 60, secs % 60),
         _ => format!("{} h {} min", secs / 3600, (secs % 3600).div_ceil(60)),
     }
 }
 
-/// "release.tar.xz: 84% (18.5 of 22.0 GB), 21.4 MB/s, about 3 min left". `done` includes bytes
+/// "release.tar.xz: 84% (18.5 of 22.0 GB), 21.4 MB/s, about 2 min 55 s left". `done` includes bytes
 /// from earlier runs; `rate` is bytes per second of this run. Without a known total it just
 /// says how much has arrived.
 pub fn progress_line(name: &str, done: u64, total: Option<u64>, rate: f64) -> String {
@@ -57,12 +57,12 @@ pub fn time_left(fraction: f64, elapsed_secs: f64) -> Option<String> {
 mod tests {
     #[test]
     fn progress_says_percent_size_and_time_left() {
-        // 18.5 GB of 22 GB done, 20 MB/s: 3.5 GB left is 175 s, shown as 3 min.
+        // 18.5 GB of 22 GB done, 20 MB/s: 3.5 GB left is 175 s, shown as 2 min 55 s.
         let line =
             super::progress_line("release.tar.xz", 18_500_000_000, Some(22_000_000_000), 20e6);
         assert_eq!(
             line,
-            "release.tar.xz: 84% (18.5 GB of 22.0 GB), 20.0 MB/s, about 3 min left"
+            "release.tar.xz: 84% (18.5 GB of 22.0 GB), 20.0 MB/s, about 2 min 55 s left"
         );
         // Unknown total: no percentage, no promise about time.
         let line = super::progress_line("artist.tar.xz", 500_000_000, None, 10e6);
@@ -72,7 +72,7 @@ mod tests {
     #[test]
     fn times_read_naturally() {
         assert_eq!(super::human_time(45), "45 s");
-        assert_eq!(super::human_time(61), "2 min");
+        assert_eq!(super::human_time(61), "1 min 1 s");
         assert_eq!(super::human_time(5400), "1 h 30 min");
     }
 
@@ -81,6 +81,9 @@ mod tests {
         assert_eq!(super::time_left(0.0005, 100.0), None);
         assert_eq!(super::time_left(0.5, 5.0), None);
         // A quarter done after 10 minutes: 30 more minutes.
-        assert_eq!(super::time_left(0.25, 600.0), Some("30 min".to_string()));
+        assert_eq!(
+            super::time_left(0.25, 600.0),
+            Some("30 min 0 s".to_string())
+        );
     }
 }

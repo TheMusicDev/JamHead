@@ -38,7 +38,7 @@ fn error(status: StatusCode, msg: &str) -> Response {
 }
 
 fn internal_error(e: anyhow::Error) -> Response {
-    eprintln!("store error: {e:#}");
+    crate::log!("store error: {e:#}");
     error(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
 }
 
@@ -252,7 +252,7 @@ async fn search(
             match index.search(&q, limit) {
                 Ok(hits) => hits,
                 Err(e) => {
-                    eprintln!("text search error: {e:#}");
+                    crate::log!("text search error: {e:#}");
                     return error(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
                 }
             }
@@ -328,7 +328,7 @@ async fn reload(app: &App) -> Result<Option<String>> {
     let opened = tokio::task::spawn_blocking(move || Data::open(&dir)).await??;
     let version = opened.meta.data_version.clone();
     app.data.store(Arc::new(opened));
-    eprintln!("switched to data version {version}");
+    crate::log!("switched to data version {version}");
     Ok(Some(version))
 }
 
@@ -373,7 +373,7 @@ pub struct ServeOptions {
 
 pub async fn serve(opts: ServeOptions) -> Result<()> {
     let data = Data::open(&datadir::resolve(&opts.root)?)?;
-    eprintln!("serving data version {}", data.meta.data_version);
+    crate::log!("serving data version {}", data.meta.data_version);
     let app: App = Arc::new(AppState {
         data: ArcSwap::from_pointee(data),
         root: opts.root,
@@ -393,7 +393,7 @@ pub async fn serve(opts: ServeOptions) -> Result<()> {
                     // Keep serving the old version; only say it once per distinct problem.
                     Err(e) if e.to_string() != last_error => {
                         last_error = e.to_string();
-                        eprintln!("reload failed, still serving the old version: {e:#}");
+                        crate::log!("reload failed, still serving the old version: {e:#}");
                     }
                     Err(_) => {}
                 }
@@ -407,8 +407,8 @@ pub async fn serve(opts: ServeOptions) -> Result<()> {
             while hangup.recv().await.is_some() {
                 match reload(&app).await {
                     Ok(Some(_)) => {}
-                    Ok(None) => eprintln!("SIGHUP: already serving the newest version"),
-                    Err(e) => eprintln!("reload failed, still serving the old version: {e:#}"),
+                    Ok(None) => crate::log!("SIGHUP: already serving the newest version"),
+                    Err(e) => crate::log!("reload failed, still serving the old version: {e:#}"),
                 }
             }
         });
@@ -416,7 +416,7 @@ pub async fn serve(opts: ServeOptions) -> Result<()> {
 
     let listener = tokio::net::TcpListener::bind(&opts.bind).await?;
     // Printed on stdout so tests (and scripts) can learn the real port when binding to :0.
-    println!("listening on http://{}", listener.local_addr()?);
+    crate::log_out!("listening on http://{}", listener.local_addr()?);
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     axum::serve(listener, router(app))
         .with_graceful_shutdown(async move {

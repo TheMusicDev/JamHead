@@ -82,12 +82,12 @@ const RETRY_PAUSE: Duration = Duration::from_secs(5);
 
 fn fetch_file(agent: &ureq::Agent, url: &str, dest: &Path, expected: &str) -> Result<()> {
     if dest.exists() {
-        eprintln!(
+        crate::log!(
             "{}: found a finished file, checking its checksum (a big file takes a few minutes)...",
             short(dest)
         );
         if sha256_file(dest)? == expected {
-            eprintln!("{}: already downloaded and verified", short(dest));
+            crate::log!("{}: already downloaded and verified", short(dest));
             return Ok(());
         }
         fs::remove_file(dest)?;
@@ -105,7 +105,7 @@ fn fetch_file(agent: &ureq::Agent, url: &str, dest: &Path, expected: &str) -> Re
             Ok(res) => res,
             // Right after a dropped connection the network may still be down: wait and try again.
             Err(e) if attempt + 1 < MAX_TRIES => {
-                eprintln!(
+                crate::log!(
                     "{}: {e}; try {} of {MAX_TRIES}, again in 5 s",
                     dest.display(),
                     attempt + 1
@@ -117,7 +117,7 @@ fn fetch_file(agent: &ureq::Agent, url: &str, dest: &Path, expected: &str) -> Re
         };
         let mut file = match res.status().as_u16() {
             206 => {
-                eprintln!(
+                crate::log!(
                     "{}: resuming from {} (a restarted download keeps what it already has)",
                     short(dest),
                     crate::progress::human_size(have)
@@ -157,7 +157,7 @@ fn fetch_file(agent: &ureq::Agent, url: &str, dest: &Path, expected: &str) -> Re
         if let Err(e) =
             copy_with_progress(res.body_mut().as_reader(), &mut file, dest, start, total)
         {
-            eprintln!(
+            crate::log!(
                 "{}: connection broke ({e:#}); try {} of {MAX_TRIES}, resuming in 5 s",
                 dest.display(),
                 attempt + 1
@@ -168,7 +168,7 @@ fn fetch_file(agent: &ureq::Agent, url: &str, dest: &Path, expected: &str) -> Re
         }
         file.flush()?;
         drop(file);
-        eprintln!(
+        crate::log!(
             "{}: downloaded, checking its checksum (a big file takes a few minutes)...",
             short(dest)
         );
@@ -181,7 +181,7 @@ fn fetch_file(agent: &ureq::Agent, url: &str, dest: &Path, expected: &str) -> Re
             );
         }
         fs::rename(&part, dest)?;
-        eprintln!("{}: checksum OK", short(dest));
+        crate::log!("{}: checksum OK", short(dest));
         return Ok(());
     }
     bail!("{}: could not download", dest.display())
@@ -208,7 +208,7 @@ fn copy_with_progress(
         if last.elapsed() > Duration::from_secs(5) {
             last = Instant::now();
             let rate = copied as f64 / started.elapsed().as_secs_f64();
-            eprintln!(
+            crate::log!(
                 "{}",
                 crate::progress::progress_line(&short(dest), start + copied, total, rate)
             );
@@ -251,7 +251,7 @@ pub fn run(opts: &Options) -> Result<PathBuf> {
         )?;
     }
     fs::write(dir.join("DUMP_DATE"), &date)?;
-    eprintln!("dump {date} is in {}", dir.display());
+    crate::log!("dump {date} is in {}", dir.display());
     Ok(dir)
 }
 

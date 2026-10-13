@@ -138,7 +138,7 @@ fn kinds(names: &[String]) -> anyhow::Result<Vec<store::Kind>> {
 
 fn main() {
     if let Err(e) = run() {
-        eprintln!("FAILED: {e:#}");
+        crate::log!("FAILED: {e:#}");
         std::process::exit(1);
     }
 }

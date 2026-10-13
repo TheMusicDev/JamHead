@@ -11,7 +11,7 @@ Items that change the storage design need the owner's approval before work start
 - Synology steps written from a real NAS (PR #16).
 - `0.1.1`: big downloads were cut off after 2 minutes; now no time limit, retry and resume (PR #17).
 - `0.1.2`: ingest writes records in id order (for spinning disks, [#8](https://github.com/TheMusicDev/JamHead/issues/8)) and prints plain-English progress with percent and time left ([#19](https://github.com/TheMusicDev/JamHead/issues/19), PR #20).
-- `0.1.3` (once tagged): fixes "Too many open files" on macOS (the 0.1.2 writer held up to 768 files open; macOS allows 256), and times over a minute show seconds.
+- `0.1.3` (once tagged): fixes "Too many open files" on macOS (the 0.1.2 writer held up to 768 files open; macOS allows 256), times over a minute show seconds, and every log line starts with the date and time.
 
 ## Now: build the full catalog and get it onto the NAS
 

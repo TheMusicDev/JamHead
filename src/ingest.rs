@@ -288,7 +288,7 @@ fn run_kind(
     let file_size = fs::metadata(path)?.len();
     let read_bytes = Arc::new(AtomicU64::new(0));
     let reader_bytes = read_bytes.clone();
-    eprintln!(
+    crate::log!(
         "Reading {label} from {} ({}). This is the slow part.",
         path.file_name()
             .map(|n| n.to_string_lossy())
@@ -323,7 +323,7 @@ fn run_kind(
                 Err(e) => {
                     bad += 1;
                     if bad <= 10 {
-                        eprintln!("{name}: skipping bad line: {e:#}");
+                        crate::log!("{name}: skipping bad line: {e:#}");
                     }
                 }
             }
@@ -340,7 +340,7 @@ fn run_kind(
             let left = crate::progress::time_left(fraction, secs)
                 .map(|t| format!(", about {t} left"))
                 .unwrap_or_default();
-            eprintln!(
+            crate::log!(
                 "Reading {label}: {:.0}%{left} ({} records so far, {:.0}/s)",
                 (fraction * 100.0).min(100.0),
                 docs.len(),
@@ -352,11 +352,11 @@ fn run_kind(
         .join()
         .map_err(|_| anyhow::anyhow!("reader thread panicked"))?;
     if bad > 0 {
-        eprintln!(
+        crate::log!(
             "Warning: skipped {bad} unreadable lines in the {name} dump (everything else was kept)"
         );
     }
-    eprintln!(
+    crate::log!(
         "Reading {label}: done, {} records in {}",
         docs.len(),
         crate::progress::human_time(started.elapsed().as_secs())
@@ -417,9 +417,9 @@ pub fn run(opts: &Options) -> Result<PathBuf> {
     fs::rename(&build, &live)?;
     datadir::flip_current(&opts.out, &version)?;
     for old in datadir::prune(&opts.out, opts.keep_versions)? {
-        eprintln!("pruned old version {old}");
+        crate::log!("pruned old version {old}");
     }
-    eprintln!(
+    crate::log!(
         "DONE in {}. Data version {version} is now the live one.",
         crate::progress::human_time(run_started.elapsed().as_secs())
     );
@@ -443,7 +443,7 @@ fn build_into(
     let mut counts = BTreeMap::new();
     for kind in ORDER {
         let Some(path) = locate(&opts.input, kind.api_name()) else {
-            eprintln!(
+            crate::log!(
                 "No {} dump found in {}, skipping it",
                 kind.api_name(),
                 opts.input.display()
@@ -451,7 +451,7 @@ fn build_into(
             continue;
         };
         let res = run_kind(kind, &path, opts, &ctx, writer.as_mut())?;
-        eprintln!(
+        crate::log!(
             "Building search indexes for {}s (a few minutes, no progress lines)...",
             kind.api_name().replace('-', " ")
         );
@@ -469,7 +469,7 @@ fn build_into(
     }
     writer.finish()?;
 
-    eprintln!("Checksumming the new files, so `verify` can spot damage later...");
+    crate::log!("Checksumming the new files, so `verify` can spot damage later...");
     let meta = Meta {
         schema_version: SCHEMA_VERSION,
         data_version: version.to_string(),

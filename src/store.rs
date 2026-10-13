@@ -8,8 +8,7 @@ use heed::types::Bytes;
 use heed::{CompactionOption, Database, Env, EnvFlags, EnvOpenOptions};
 use rayon::prelude::*;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -235,12 +234,16 @@ impl EntityStore for LmdbStore {
 /// so the files come out about the same size, each is small enough to sort in memory, and LMDB is
 /// filled front to back.
 const BUCKETS: usize = 256;
+/// Each bucket collects records in memory and appends them to its file in chunks this big. The files
+/// are opened and closed for each chunk: holding all of them open at once (256 per kind, three kinds)
+/// hit the default open-files limit of 256 on macOS ("Too many open files").
+const SPOOL_CHUNK: usize = 128 * 1024;
 
 pub struct LmdbWriter {
     dir: PathBuf,
     env: Env,
     dbs: HashMap<&'static str, Database<Bytes, Bytes>>,
-    spool: HashMap<Kind, Vec<BufWriter<File>>>,
+    spool: HashMap<Kind, Vec<Vec<u8>>>,
 }
 
 impl LmdbWriter {
@@ -278,14 +281,15 @@ impl LmdbWriter {
 
     /// Move one kind's spooled records into LMDB, bucket by bucket in id order.
     fn write_kind(&mut self, kind: Kind) -> Result<()> {
-        let Some(mut files) = self.spool.remove(&kind) else {
+        let Some(mut buffers) = self.spool.remove(&kind) else {
             return Ok(());
         };
-        for f in &mut files {
-            f.flush()?;
-        }
-        drop(files);
         let dir = self.spool_dir(kind);
+        // Also creates the file of a bucket that never received a record.
+        for (bucket, buf) in buffers.iter_mut().enumerate() {
+            append_to_bucket(&dir, bucket, buf)?;
+        }
+        drop(buffers);
         let name = kind.api_name().replace('-', " ");
         eprintln!("Writing {name} records to the database, in order...");
         let started = Instant::now();
@@ -322,6 +326,17 @@ impl LmdbWriter {
     }
 }
 
+/// Append what a bucket has collected to its file and empty the buffer.
+fn append_to_bucket(dir: &Path, bucket: usize, buf: &mut Vec<u8>) -> Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(format!("{bucket:02x}")))?;
+    file.write_all(buf)?;
+    buf.clear();
+    Ok(())
+}
+
 /// Split a spool file into (id, plain JSON) records: 16 id bytes, a little-endian u32 length, the bytes.
 fn unspool(mut bytes: &[u8]) -> Result<Vec<(Mbid, &[u8])>> {
     let mut out = Vec::new();
@@ -339,20 +354,21 @@ fn unspool(mut bytes: &[u8]) -> Result<Vec<(Mbid, &[u8])>> {
 impl StoreWriter for LmdbWriter {
     fn put_batch(&mut self, kind: Kind, items: &[(Mbid, Blob)]) -> Result<()> {
         if !self.spool.contains_key(&kind) {
-            let dir = self.spool_dir(kind);
-            std::fs::create_dir_all(&dir)?;
-            let files = (0..BUCKETS)
-                .map(|b| File::create(dir.join(format!("{b:02x}"))).map(BufWriter::new))
-                .collect::<std::io::Result<Vec<_>>>()?;
-            self.spool.insert(kind, files);
+            std::fs::create_dir_all(self.spool_dir(kind))?;
+            self.spool.insert(kind, vec![Vec::new(); BUCKETS]);
         }
-        let files = self.spool.get_mut(&kind).expect("just inserted");
+        let dir = self.spool_dir(kind);
+        let buffers = self.spool.get_mut(&kind).expect("just inserted");
         for (id, blob) in items {
             let plain = blob.get(Encoding::Identity);
-            let file = &mut files[id[0] as usize];
-            file.write_all(id)?;
-            file.write_all(&(plain.len() as u32).to_le_bytes())?;
-            file.write_all(plain)?;
+            let bucket = id[0] as usize;
+            let buf = &mut buffers[bucket];
+            buf.extend_from_slice(id);
+            buf.extend_from_slice(&(plain.len() as u32).to_le_bytes());
+            buf.extend_from_slice(plain);
+            if buf.len() >= SPOOL_CHUNK {
+                append_to_bucket(&dir, bucket, buf)?;
+            }
         }
         Ok(())
     }

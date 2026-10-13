@@ -48,6 +48,18 @@ test("ingest leaves no temporary spool files in the finished data", async () => 
   expect(existsSync(join(out, version, "store", "spool"))).toBe(false);
 });
 
+test("ingest works with only 256 files allowed open (the macOS default)", async () => {
+  // Once failed with "Too many open files" because every spool file was held open at the same time.
+  const out = mkdtempSync(join(tmpdir(), "jamhead-ulimit-"));
+  const proc = Bun.spawn(["sh", "-c", `ulimit -n 256 && "${BIN}" ingest --input "${FIXTURE_DIR}" --out "${out}"`], {
+    stdout: "ignore",
+    stderr: "pipe",
+  });
+  const err = await new Response(proc.stderr).text();
+  expect(await proc.exited).toBe(0);
+  expect(err).toContain("DONE in");
+});
+
 test("a failure ends with a FAILED line that gives the reason", async () => {
   const out = mkdtempSync(join(tmpdir(), "jamhead-fail-"));
   const r = await run(["ingest", "--input", "/definitely/not/here", "--out", out]);

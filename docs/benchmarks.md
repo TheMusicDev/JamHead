@@ -220,7 +220,7 @@ requests (about -50%, costs a few microseconds per plain request); train a zstd 
 (typically a large win on small similar documents; not measured); a custom packed file (about -30% by removing page
 rounding; not worth it alone). None needs a change of storage engine, and `EntityStore` keeps that door open.
 
-### Estimates for the full dump (NOT measured: straight-line from the 300k run)
+### Estimates for the full dump (NOT measured: straight-line from the 300k run; the NAS run at the end of this page is the real measurement)
 
 | | per 1 M entities | for 5 M releases + 3 M release groups + 2.5 M artists |
 |---|---:|---:|
@@ -280,3 +280,60 @@ hold 300,000 entries. All Rust and Bun tests pass unchanged.
 **Not yet proven:** that the NAS now keeps its speed past 300,000 records. To check, rerun on the NAS
 (`ingest` or `update`, smaller catalog first) and watch whether the "records so far / s" figure in the log stays
 roughly flat. Record the result here.
+
+**Result (2026-10-13):** it stayed flat; see "Full catalog built on the NAS" at the end of this page.
+
+## Full catalog built on the NAS (2026-10-13)
+
+**Measured** on the same Synology DS923+ as above (4 GB RAM, spinning disks, shared with other services), Docker image
+**0.1.3**, real MusicBrainz dump 20261010-001001 (already downloaded and verified, so the download was not timed),
+container capped at `mem_limit: 3g`, command `update --keep-versions 1` (no `--limit`, so the whole catalog).
+It finished: `DONE in 1 h 54 min. Data version v2026-10-13T200337 is now the live one.` The numbers below come
+from the container's own log (times are UTC; the container has no time zone set).
+
+| step | time | records | speed |
+|---|---:|---:|---:|
+| Reading releases | 46 min 23 s | 5,840,725 | about 2,100 / s, flat from the first minutes to the end |
+| Building search indexes, releases | 1 min 27 s | | |
+| Reading release groups | 2 min 27 s | 4,569,760 | about 31,000 / s |
+| Building search indexes, release groups | 1 min 2 s | | |
+| Reading artists | 3 min 8 s | 3,008,890 | about 16,000 / s |
+| Building search indexes, artists | 40 s | | |
+| Writing artists to the database (sorted) | 8 min 40 s | 3,008,890 | about 5,800 / s |
+| Writing release groups | 13 min 52 s | 4,569,760 | about 5,500 / s |
+| Writing releases | 26 min 10 s | 5,840,725 | about 3,700 / s |
+| Compacting the database | 9 min 18 s | | |
+| Checksumming the new files | 6 s | | |
+| **Whole run** | **1 h 54 min** | | |
+
+**Sizes of the finished version** (from `/v1/meta`): record store `store/data.mdb` 69.9 GB, name indexes (`fst/`)
+1.0 GB, Tantivy search indexes 1.0 GB, **about 72 GB in all**. The estimate above said about 66 GB.
+
+**What this shows**
+- The slowdown from the 0.1.1 run (958 / s down to 67 / s) did not come back. Reading stayed at about 2,100 / s
+  for 46 minutes, and each 12% step of every write phase took the same time as the one before it. This is the
+  evidence that sorted writes (0.1.2) fix the spinning-disk problem ([#8](https://github.com/TheMusicDev/JamHead/issues/8)).
+  Caveat: the old unsorted code was never run on the NAS for the same stage, so the comparison is with the earlier
+  0.1.1 run, not side by side.
+- Memory: the container was **not** killed under a 3 GB cap, so the full ingest fits a stock 4 GB DS923+ with that
+  cap. The **peak memory was not recorded**, so the real figure is still unknown.
+- The whole catalog was built on the NAS itself; copying a finished build from a Mac is not needed.
+
+**Checked against the live MusicBrainz API** (read-only calls, a few records, not the whole catalog):
+- OK Computer (release group): 39 releases in both. Same first release date.
+- Radiohead (artist), Abbey Road (release): same name, type, country, status, packaging.
+- Radiohead's release groups: MusicBrainz 587, JamHead 586. The one missing, "Go to Sleep" (a 2003 live album,
+  `f4b8f066-a9f2-428d-b962-982fe90ab52a`), is not in the 20261010 release-group dump file (searched the file; the
+  same search found OK Computer's id 21 times), so it was added to MusicBrainz after the dump. Not an ingest bug.
+- Prefix search matches aliases, which is why "radiohead" also returns "On a Friday" (alias "Radiohead") and "love"
+  returns Calvin Harris (alias "Love Regenerator"). That is by design, but whether alias matches should rank
+  lower is an open quality question.
+
+**Single requests from a Mac over the LAN** (one try each, NOT a benchmark, only a sanity check): `/v1/meta` 13 ms;
+searches 16 to 41 ms, with the very first one 410 ms; artist lookup 240 ms the first time, then 8 to 40 ms;
+Radiohead's 586 release groups 270 ms; OK Computer's releases 161 ms; unknown id (404) 78 ms. The slow first
+requests are consistent with a cold page cache on spinning disks (70 GB of data, 4 GB of RAM), but no proper
+cold / warm test was run.
+
+**Still not measured:** peak memory, peak disk during the build (spool files), the download time, `verify --deep`
+on this data, and load (`oha`) against the NAS. Tracked in [#6](https://github.com/TheMusicDev/JamHead/issues/6).

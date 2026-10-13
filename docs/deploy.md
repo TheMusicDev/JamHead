@@ -11,22 +11,23 @@ The full MusicBrainz catalog is big. Pick the size that fits your disk:
 | the test fixture (`tests/fixtures/dump`) | 0 (in the repo) | 1.5 MB | negligible | 1 s | measured |
 | 10,000 artists + release groups + releases (partial download) | about 150 MB | 157 MB | small | 10 s | measured |
 | 300,000 artists + release groups + releases | about 2.7 GB (partial download) | 4.4 GB | about 0.5 GB private | 3 min | measured |
-| **the full catalog** | **about 25 GB** (artist 2 GB, release-group 1 GB, release 22 GB) | **about 66 GB per data version** | roughly 3 to 4 GB private during ingest, plus file cache | about 35 min plus the download | **estimate** (see [benchmarks.md](benchmarks.md)) |
+| **the full catalog** | **about 25 GB** (artist 2 GB, release-group 1 GB, release 22 GB) | **72 GB per data version** (measured) | stayed under a 3 GB cap on a DS923+ (peak not recorded) | **1 h 54 min ingest on a DS923+ with spinning disks** (measured; about 35 min estimated for the laptop), plus the download | **measured on the NAS**; download time and memory peak not (see [benchmarks.md](benchmarks.md)) |
 
-For the full catalog, **plan for about 250 GB of free disk**:
+For the full catalog, **plan for about 270 GB of free disk**:
 
 - A new version is built next to the live one and the previous one is kept for rollback, so while an update runs
-  there are **three** versions on disk (about 200 GB).
+  there are **three** versions on disk (about 216 GB).
 - The downloaded dumps (about 25 GB) are on disk until the update finishes (they are deleted afterwards unless you
   pass `--keep-dumps`).
 - The old versions are only pruned after the new one is live.
 
 Tight on disk? `--keep-versions 1` (on `ingest` and `update`) deletes the previous version as soon as the new one
-is live. Peak disk is then the live version plus the new one (about 135 GB, plus 25 GB of dumps), at the price of
-having no version to roll back to. The very first build needs only about 90 GB (one version plus the dumps).
+is live. Peak disk is then the live version plus the new one (about 145 GB, plus 25 GB of dumps), at the price of
+having no version to roll back to. The very first build needs only about 100 GB (one version plus the dumps).
 
-The 66 GB and the 250 GB are extrapolations from the 300,000-per-kind run, not measurements. Nobody has run the
-full catalog yet. After a real run, `jamhead stats` prints the true sizes; please correct this table.
+The 72 GB per version is measured (the full catalog built on a DS923+). The other totals are arithmetic from it plus
+about 30 GB of temporary space while ingesting, which is an estimate: nobody has measured the peak disk during a
+build. `jamhead stats` prints the true sizes of your own data.
 
 Other things a host needs:
 
@@ -95,7 +96,7 @@ Released versions are published to the GitHub Container Registry for both `linux
 servers) and `linux/arm64` (Apple silicon, Raspberry Pi), so `docker pull` picks the right one by itself:
 
 ```
-docker pull ghcr.io/themusicdev/jamhead:0.1.0
+docker pull ghcr.io/themusicdev/jamhead:0.1.3
 ```
 
 - Tags are exact versions only (`0.1.0`). There is no `latest` and no `0.1`: pin the version you run, so you
@@ -135,17 +136,19 @@ exits with "no data ... run `jamhead ingest` first".
 
 Everything below uses only the DSM web interface (Container Manager). Nothing is built or copied by hand: DSM pulls
 the published image itself. Steps 1 and 2 were run on a real NAS (version 0.1.0, image pulled and started). Step 3
-onward is still untried, so treat its menu names as from memory.
+was run there too (version 0.1.3, the full catalog built in 1 h 54 min); the later steps are still untried, so treat
+their menu names as from memory.
 
 **Serving** needs about 0.5 GB of private memory plus whatever file cache the kernel gives it. **Ingesting the
-full catalog on a stock 4 GB DS923+ is untested and probably will not fit**, for two reasons that are estimates,
-not measurements:
+full catalog on a stock 4 GB DS923+ worked** with `mem_limit: 3g` and image 0.1.3 (1 h 54 min; peak memory was not
+recorded). The two worries that were here before the run turned out like this:
 
 - *Memory.* Ingest keeps every record's search name in RAM while it runs. 300,000 per kind used about 430 MB, and
-  the full catalog is roughly 4 times that. DSM itself uses about 1 GB. A 16 GB RAM upgrade is the simple fix.
-- *Disk speed.* Records are written in dump order but keyed by random IDs, so every write lands at a random spot in
-  a file of tens of GB. That is fine on an SSD and may be very slow on a spinning disk. Nobody has timed it on
-  an HDD yet.
+  the full catalog was estimated at roughly 4 times that. It ran inside the 3 GB cap and was not killed. DSM itself
+  uses about 1 GB. If your run is killed, a RAM upgrade is the simple fix.
+- *Disk speed.* Old versions (0.1.1) wrote records in dump order, which slowed to a crawl on the NAS's spinning
+  disks. Since 0.1.2 records are written sorted by id, and the full run kept a flat speed all the way
+  ([benchmarks.md](benchmarks.md)).
 
 Set up:
 
@@ -162,7 +165,7 @@ Set up:
    ```yaml
    services:
      jamhead:
-       image: ghcr.io/themusicdev/jamhead:0.1.0
+       image: ghcr.io/themusicdev/jamhead:0.1.3
        restart: unless-stopped
        ports: ["8080:8080"]
        volumes: ["/volume1/shared-apps/jamhead/data:/data"]
@@ -179,7 +182,7 @@ Set up:
    ```yaml
    services:
      update:
-       image: ghcr.io/themusicdev/jamhead:0.1.0
+       image: ghcr.io/themusicdev/jamhead:0.1.3
        restart: "no"
        mem_limit: 3g
        command: ["update", "--data", "/data", "--dumps", "/dumps", "--keep-versions", "1"]
@@ -218,14 +221,17 @@ Station is not needed for that. Menu names from memory.
 
 ```
 Reading releases from release.tar.xz (22.0 GB). This is the slow part.
-Reading releases: 12% (about 55 min left) (610000 records so far, 958/s)
-Reading releases: done, 5012345 records in 1 h 5 min
+Reading releases: 12% (about 55 min left) (610000 records so far, 2100/s)
+Reading releases: done, 5840725 records in 46 min 23 s
 Building search indexes for releases (a few minutes, no progress lines)...
 Writing release records to the database, in order...
-  release: 25% written
+  release: 25% written, about 19 min 54 s left
 Compacting the database (one more copy ...). This can be quiet for a while...
-DONE in 2 h 14 min. Data version v... is now the live one.
+DONE in 1 h 54 min. Data version v... is now the live one.
 ```
+
+Every line starts with the date and time. Inside the container the time zone is not set, so the times are UTC
+(`+00:00`), which can be hours off your clock.
 
 - **Finished** means a line starting with `DONE`. On a failure the last line starts with `FAILED:` and says why.
 - **The container stops by itself when it is done** (status Exited, code 0).

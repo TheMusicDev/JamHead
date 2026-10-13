@@ -1,5 +1,29 @@
 //! Plain-English progress text shared by download and ingest: sizes, durations, percentages.
 
+/// Local time with its offset, e.g. "2026-10-13 12:08:41-04:00". Inside a container that has no
+/// time zone set, the offset is "+00:00" (UTC).
+pub fn now() -> String {
+    chrono::Local::now()
+        .format("%Y-%m-%d %H:%M:%S%:z")
+        .to_string()
+}
+
+/// Print a log line to stderr, starting with the time.
+#[macro_export]
+macro_rules! log {
+    ($($arg:tt)*) => {
+        eprintln!("{} {}", $crate::progress::now(), format_args!($($arg)*))
+    };
+}
+
+/// Same, to stdout (for the few log lines that already went there).
+#[macro_export]
+macro_rules! log_out {
+    ($($arg:tt)*) => {
+        println!("{} {}", $crate::progress::now(), format_args!($($arg)*))
+    };
+}
+
 pub fn human_size(bytes: u64) -> String {
     let b = bytes as f64;
     if b >= 1e9 {
@@ -67,6 +91,16 @@ mod tests {
         // Unknown total: no percentage, no promise about time.
         let line = super::progress_line("artist.tar.xz", 500_000_000, None, 10e6);
         assert_eq!(line, "artist.tar.xz: 500 MB downloaded, 10.0 MB/s");
+    }
+
+    #[test]
+    fn log_lines_start_with_a_timestamp() {
+        let t = super::now();
+        // "2026-10-13 12:08:41-04:00": 25 characters, date, time, offset.
+        assert_eq!(t.len(), 25, "{t}");
+        assert_eq!(&t[4..5], "-");
+        assert_eq!(&t[10..11], " ");
+        assert_eq!(&t[13..14], ":");
     }
 
     #[test]

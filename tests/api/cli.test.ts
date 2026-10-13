@@ -36,7 +36,11 @@ test("ingest says what it is doing, in order, and ends with DONE", async () => {
   }
   // The last line is the DONE line, so a person can tell it has finished.
   const last = r.stderr.trim().split("\n").pop()!;
-  expect(last).toMatch(/^DONE in .*Data version v\S+ is now the live one\./);
+  expect(last).toMatch(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d[+-]\d\d:\d\d DONE in .*Data version v\S+ is now the live one\./);
+  // Every log line starts with the date and time, so a long run can be followed afterwards.
+  for (const line of r.stderr.trim().split("\n")) {
+    expect(line, `line without a timestamp: ${line}`).toMatch(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d[+-]\d\d:\d\d /);
+  }
 });
 
 test("ingest leaves no temporary spool files in the finished data", async () => {
@@ -65,5 +69,5 @@ test("a failure ends with a FAILED line that gives the reason", async () => {
   const r = await run(["ingest", "--input", "/definitely/not/here", "--out", out]);
   expect(r.code).toBe(1);
   expect(r.stderr).toContain("FAILED:");
-  expect(r.stderr.trim().split("\n").pop()).toMatch(/^FAILED: .+/);
+  expect(r.stderr.trim().split("\n").pop()).toMatch(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d[+-]\d\d:\d\d FAILED: .+/);
 });

@@ -260,11 +260,11 @@ pub fn update(o: &UpdateOptions) -> Result<()> {
             .ok()
             .and_then(|d| read_meta(&d).ok());
         if live.as_ref().and_then(|m| m.dump_date.as_deref()) == Some(date.as_str()) {
-            println!("already up to date (dump {date}); use --force to rebuild anyway");
+            crate::log_out!("already up to date (dump {date}); use --force to rebuild anyway");
             return Ok(());
         }
     }
-    println!("Updating to MusicBrainz dump {date}.");
+    crate::log_out!("Updating to MusicBrainz dump {date}.");
     let dump_dir = download::run(&download::Options {
         base_url: o.base_url.clone(),
         dump: date,
@@ -281,7 +281,7 @@ pub fn update(o: &UpdateOptions) -> Result<()> {
     if !o.keep_dumps {
         fs::remove_dir_all(&dump_dir)?;
     }
-    println!(
+    crate::log_out!(
         "The new data is in {}. A running server switches to it within 10 seconds; if none is running, start one.",
         version.display()
     );

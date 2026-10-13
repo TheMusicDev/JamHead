@@ -291,7 +291,7 @@ impl LmdbWriter {
         }
         drop(buffers);
         let name = kind.api_name().replace('-', " ");
-        eprintln!("Writing {name} records to the database, in order...");
+        crate::log!("Writing {name} records to the database, in order...");
         let started = Instant::now();
         for bucket in 0..BUCKETS {
             let path = dir.join(format!("{bucket:02x}"));
@@ -318,7 +318,7 @@ impl LmdbWriter {
                 let left = crate::progress::time_left(done, started.elapsed().as_secs_f64())
                     .map(|t| format!(", about {t} left"))
                     .unwrap_or_default();
-                eprintln!("  {name}: {:.0}% written{left}", done * 100.0);
+                crate::log!("  {name}: {:.0}% written{left}", done * 100.0);
             }
         }
         std::fs::remove_dir_all(&dir)?;
@@ -388,7 +388,7 @@ impl StoreWriter for LmdbWriter {
             self.write_kind(kind)?;
         }
         let _ = std::fs::remove_dir(self.dir.join("spool")); // empty by now
-        eprintln!("Compacting the database (one more copy, so it is smaller and laid out in order). This can be quiet for a while...");
+        crate::log!("Compacting the database (one more copy, so it is smaller and laid out in order). This can be quiet for a while...");
         self.env.force_sync()?;
         // Writing in batches leaves unused pages behind. Copy to a compacted file and swap it in:
         // smaller on disk and laid out in order for the readers.

@@ -7,28 +7,35 @@ Items that change the storage design need the owner's approval before work start
 ## Done
 
 - Milestones 1 to 6 and `--keep-versions` (PR #1).
-- Versioned images on GHCR from a version tag (#2, PR #3). Published: `0.1.0`, `0.1.1`, `0.1.2` (amd64 and arm64).
+- Versioned images on GHCR from a version tag (#2, PR #3). Published: `0.1.0` to `0.1.3` (amd64 and arm64).
 - Synology steps written from a real NAS (PR #16).
 - `0.1.1`: big downloads were cut off after 2 minutes; now no time limit, retry and resume (PR #17).
 - `0.1.2`: ingest writes records in id order (for spinning disks, [#8](https://github.com/TheMusicDev/JamHead/issues/8)) and prints plain-English progress with percent and time left ([#19](https://github.com/TheMusicDev/JamHead/issues/19), PR #20).
-- `0.1.3` (once tagged): fixes "Too many open files" on macOS (the 0.1.2 writer held up to 768 files open; macOS allows 256), times over a minute show seconds, and every log line starts with the date and time.
+- `0.1.3` (PRs #21 and #22, tagged and published): fixes "Too many open files" on macOS (the 0.1.2 writer held up to 768 files open; macOS allows 256), times over a minute show seconds, and every log line starts with the date and time.
 
-## Now: build the full catalog and get it onto the NAS
+## Now: finish measuring the full catalog on the NAS
 
-| # | What | Why this position | Status |
-|---|---|---|---|
-| 1 | **Build the full catalog on a Mac with a fast external SSD** (`update --dump 20261010-001001`), then `verify` | The stock NAS slowed to a crawl building it itself (see `docs/benchmarks.md`). A Mac with plenty of RAM and SSD does not have that problem. | in progress: downloads done and checked, first ingest hit the open-files bug fixed in 0.1.3 |
-| 2 | **Copy the finished version folder to the NAS and run `verify` there** | Proves that data built on a Mac (Apple silicon, arm64) opens on the NAS (x86, amd64). Untested: try it with a small 300,000 build first. Also work out how the NAS points `current` at the copied folder. | after #1 |
-| 3 | **Pull the image on the NAS and start `serve` on that data** ([#4](https://github.com/TheMusicDev/JamHead/issues/4)) | Pull and start were proven; the healthcheck on real data is not. | after #2 and the `v0.1.3` tag |
-| 4 | **Record real numbers** (Mac build time and size, NAS memory) in `docs/benchmarks.md` and correct the estimates in `docs/deploy.md` ([#6](https://github.com/TheMusicDev/JamHead/issues/6)) | Every full-size number in the docs is still an estimate. | after #1 to #3 |
-| 5 | **Decide whether the NAS can build updates itself** ([#8](https://github.com/TheMusicDev/JamHead/issues/8), [#7](https://github.com/TheMusicDev/JamHead/issues/7)) | The 0.1.2 writer should fix the slowdown, but it has only been tested where everything fits in RAM. Run a `--limit 300000` update on the NAS with 0.1.3 and watch the speed stay flat. Close #8 only if it does. | after the `v0.1.3` tag |
+The full catalog was built **on the NAS itself** (image 0.1.3, 1 h 54 min, about 72 GB) and is being served from
+there; numbers are in `docs/benchmarks.md`. That made the old plan (build on a Mac, copy to the NAS) unnecessary.
+
+| # | What | Status |
+|---|---|---|
+| 1 | **Record the full-run numbers and fix the estimates in `docs/deploy.md`** ([#6](https://github.com/TheMusicDev/JamHead/issues/6)) | done for time, size and speed; still missing: peak memory, peak disk during the build, download time |
+| 2 | **Run `verify --deep` on the NAS data** | not run yet; note `data.mdb` (70 GB) has a size check but no checksum |
+| 3 | **Confirm the container health check passes on this data** ([#4](https://github.com/TheMusicDev/JamHead/issues/4)) | `/healthz` answers `ok`; the Container Manager health status was not looked at |
+| 4 | **Load test the NAS API** (`oha`, cold and warm cache) | not run; single requests suggest the first request for a record is slower (up to 0.4 s) on cold disks |
+| 5 | **Can the NAS build updates itself?** ([#8](https://github.com/TheMusicDev/JamHead/issues/8), [#7](https://github.com/TheMusicDev/JamHead/issues/7)) | yes: sorted writes held their speed and the run fit in a 3 GB cap. #8 can close; keep #7 open only if peak memory turns out to be tight |
 
 ## Next
 
-- Tag `v0.1.3`, then update the `0.1.0` / `0.1.1` pins in `docs/deploy.md` to it.
 - A `sample` option so a small data set needs no terminal ([#5](https://github.com/TheMusicDev/JamHead/issues/5)).
 - Useful JSON at `/` instead of an empty 404 ([#18](https://github.com/TheMusicDev/JamHead/issues/18)).
 - Lower ingest memory, only if the NAS numbers show memory is the limit ([#7](https://github.com/TheMusicDev/JamHead/issues/7)).
+- Prefix search matches aliases, so "love" returns Calvin Harris (alias "Love Regenerator"). Decide whether alias
+  matches should rank below name matches.
+- Unexplained: a full ingest on a Mac (external exFAT drive) crashed with a segmentation fault inside LMDB while
+  writing; it could not be reproduced with synthetic or real replayed data and did not happen on the NAS. Only
+  worth chasing if someone needs to build on a Mac.
 
 ## Housekeeping (small, any time)
 
